@@ -33,6 +33,12 @@
       "import": "./dist/connection/index.mjs",
       "require": "./dist/connection/index.js"
     },
+    "./client": {
+      "source": "./src/client/index.ts",
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.mjs",
+      "require": "./dist/client/index.js"
+    },
     "./protocol": {
       "source": "./src/protocol/index.ts",
       "types": "./dist/protocol/index.d.ts",
