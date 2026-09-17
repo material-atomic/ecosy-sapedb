@@ -1,0 +1,82 @@
+{
+  "name": "@ecosy/rsql",
+  "version": "0.0.0",
+  "description": "RSQL: a storage service addressed by a connection string — driver, signer, command bus and shape registry",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "fixtures"
+  ],
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json",
+    "./signer": {
+      "source": "./src/signer/index.ts",
+      "types": "./dist/signer/index.d.ts",
+      "import": "./dist/signer/index.mjs",
+      "require": "./dist/signer/index.js"
+    },
+    "./commander": {
+      "source": "./src/commander/index.ts",
+      "types": "./dist/commander/index.d.ts",
+      "import": "./dist/commander/index.mjs",
+      "require": "./dist/commander/index.js"
+    },
+    "./shape": {
+      "source": "./src/shape/index.ts",
+      "types": "./dist/shape/index.d.ts",
+      "import": "./dist/shape/index.mjs",
+      "require": "./dist/shape/index.js"
+    },
+    "./fixtures/signing.json": "./fixtures/signing.json"
+  },
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "eslint src/ && rollup -c",
+    "test": "yarn build && yarn test:run",
+    "test:run": "node --test \"tests/*.test.mjs\"",
+    "lint": "eslint src/",
+    "prepublishOnly": "yarn clean && yarn build && yarn test:run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/material-atomic/ecosy-rsql.git"
+  },
+  "keywords": [
+    "ecosy",
+    "rsql",
+    "storage",
+    "sqlite",
+    "command-bus",
+    "typescript"
+  ],
+  "author": "material-atomic",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@rollup/plugin-terser": "^1.0.0",
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@types/node": "^26.2.0",
+    "@typescript-eslint/eslint-plugin": "^8.67.0",
+    "@typescript-eslint/parser": "^8.67.0",
+    "eslint": "^10.9.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.6",
+    "glob": "^13.0.6",
+    "prettier": "^3.9.6",
+    "rimraf": "^6.1.3",
+    "rollup": "^4.62.5",
+    "tslib": "^2.8.1",
+    "typescript": "6"
+  }
+}
