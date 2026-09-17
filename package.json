@@ -27,6 +27,24 @@
       "import": "./dist/signer/index.mjs",
       "require": "./dist/signer/index.js"
     },
+    "./connection": {
+      "source": "./src/connection/index.ts",
+      "types": "./dist/connection/index.d.ts",
+      "import": "./dist/connection/index.mjs",
+      "require": "./dist/connection/index.js"
+    },
+    "./protocol": {
+      "source": "./src/protocol/index.ts",
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.mjs",
+      "require": "./dist/protocol/index.js"
+    },
+    "./errors": {
+      "source": "./src/errors.ts",
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.mjs",
+      "require": "./dist/errors.js"
+    },
     "./commander": {
       "source": "./src/commander/index.ts",
       "types": "./dist/commander/index.d.ts",

@@ -6,6 +6,7 @@
  * reaches for:
  *
  * ```ts
+ * import { parseConnectionString } from "@ecosy/rsql/connection";
  * import { sign } from "@ecosy/rsql/signer";
  * import { Commander } from "@ecosy/rsql/commander";
  * import { ShapeRegistry } from "@ecosy/rsql/shape";
@@ -13,3 +14,5 @@
  */
 
 export * from "./signer";
+export * from "./connection";
+export * from "./errors";
