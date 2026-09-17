@@ -5,7 +5,7 @@
  * ```ts
  * import { sign, verify } from "@ecosy/rsql/signer";
  *
- * const sig = await sign({ userId, password, projectId }, { secret: process.env.RSQL_SECRET! });
+ * const sig = await sign({ accountId, password, dbname }, { secret: process.env.RSQL_SECRET! });
  * ```
  *
  * Web Crypto only, so this runs on Node, on the edge and in Workers alike.
@@ -13,14 +13,18 @@
 
 const encoder = new TextEncoder();
 
-/** What a signature covers. The three fields of an `rsql://` string that identify a connection. */
+/** What a signature covers: the three fields of an `rsql://` string that identify a connection. */
 export interface ConnectionParts {
-  /** Who RunSnip issued the string to. */
-  userId: string;
+  /**
+   * The registered account — the product or service this string belongs to.
+   * The tenant boundary: a connection never reaches across accounts, and a
+   * database name only has to be unique within one.
+   */
+  accountId: string;
   /** The rotation key. Changing it invalidates every signature issued before. */
   password: string;
-  /** The project, which is also the database name and the tenant boundary. */
-  projectId: string;
+  /** The database, unique within the account. */
+  dbname: string;
 }
 
 export interface SignOptions {
@@ -121,13 +125,13 @@ function signingKey(secret: string, label: string | null): Promise<CryptoKey> {
   return pending;
 }
 
-/** The exact bytes signed: `user_id ":" password ":" project_id`, UTF-8, unnormalised. */
+/** The exact bytes signed: `account_id ":" password ":" dbname`, UTF-8, unnormalised. */
 export function signedMessage(parts: ConnectionParts): string {
-  assertField(parts?.userId, "user_id");
+  assertField(parts?.accountId, "account_id");
   assertPassword(parts.password);
-  assertField(parts.projectId, "project_id");
+  assertField(parts.dbname, "dbname");
 
-  return `${parts.userId}:${parts.password}:${parts.projectId}`;
+  return `${parts.accountId}:${parts.password}:${parts.dbname}`;
 }
 
 function toHex(bytes: ArrayBuffer): string {

@@ -13,8 +13,8 @@ const OPTIONS = { secret: fixture.secret, label: fixture.label };
 test("fixture: every case signs to the hex the store must produce, in both modes", async () => {
   assert.ok(fixture.cases.length >= 6);
 
-  for (const { name, userId, password, projectId, derived, direct } of fixture.cases) {
-    const parts = { userId, password, projectId };
+  for (const { name, accountId, password, dbname, derived, direct } of fixture.cases) {
+    const parts = { accountId, password, dbname };
 
     assert.equal(await sign(parts, OPTIONS), derived, `${name} (derived)`);
     assert.equal(await sign(parts, { secret: fixture.secret, label: null }), direct, `${name} (direct)`);
@@ -31,17 +31,17 @@ test("fixture: every case signs to the hex the store must produce, in both modes
 test("fixture: the two splits of the same characters sign differently", () => {
   const [one, other] = fixture.cases.filter((c) => c.name.includes("split of") || c.name.includes("other split"));
   assert.ok(one && other);
-  assert.equal(one.userId + one.password + one.projectId, other.userId + other.password + other.projectId, "same characters");
+  assert.equal(one.accountId + one.password + one.dbname, other.accountId + other.password + other.dbname, "same characters");
   assert.notEqual(one.derived, other.derived, "different signatures — the delimiter is doing its job");
   assert.notEqual(one.direct, other.direct);
 });
 
-test("the message signed is user:password:project, unnormalised", () => {
-  assert.equal(signedMessage({ userId: "u", password: "p".repeat(16), projectId: "proj" }), `u:${"p".repeat(16)}:proj`);
+test("the message signed is account:password:dbname, unnormalised", () => {
+  assert.equal(signedMessage({ accountId: "u", password: "p".repeat(16), dbname: "proj" }), `u:${"p".repeat(16)}:proj`);
 });
 
 test("changing the password changes the signature — that is what revocation is", async () => {
-  const parts = { userId: "u", password: "old-password-old-pw", projectId: "p" };
+  const parts = { accountId: "u", password: "old-password-old-pw", dbname: "p" };
   const before = await sign(parts, OPTIONS);
   const after = await sign({ ...parts, password: "new-password-new-pw" }, OPTIONS);
   assert.notEqual(before, after);
@@ -49,7 +49,7 @@ test("changing the password changes the signature — that is what revocation is
 });
 
 test("another secret, or another label, does not verify", async () => {
-  const parts = { userId: "u", password: "some-password-here", projectId: "p" };
+  const parts = { accountId: "u", password: "some-password-here", dbname: "p" };
   const sig = await sign(parts, OPTIONS);
   assert.equal(await verify(sig, parts, { secret: `${fixture.secret}x`, label: fixture.label }), false);
   assert.equal(await verify(sig, parts, { secret: fixture.secret, label: "other/label" }), false);
@@ -63,7 +63,7 @@ test("another secret, or another label, does not verify", async () => {
 });
 
 test("verify: malformed input is false, never a throw", async () => {
-  const parts = { userId: "u", password: "some-password-here", projectId: "p" };
+  const parts = { accountId: "u", password: "some-password-here", dbname: "p" };
   const sig = await sign(parts, OPTIONS);
 
   for (const bad of [null, undefined, 42, "", "zz", sig.slice(0, 62), `${sig}00`, sig.toUpperCase().replace(/[0-9]/g, "0")]) {
@@ -87,8 +87,8 @@ test("password charset: what the protocol can carry", () => {
 });
 
 test("signing refuses fields that would make the message ambiguous", async () => {
-  await assert.rejects(() => sign({ userId: "a:b", password: "y".repeat(16), projectId: "p" }, OPTIONS), TypeError);
-  await assert.rejects(() => sign({ userId: "u", password: "y".repeat(16), projectId: "p:q" }, OPTIONS), TypeError);
-  await assert.rejects(() => sign({ userId: "", password: "y".repeat(16), projectId: "p" }, OPTIONS), TypeError);
-  await assert.rejects(() => sign({ userId: "u", password: "y".repeat(16), projectId: "p" }, { secret: "" }), TypeError);
+  await assert.rejects(() => sign({ accountId: "a:b", password: "y".repeat(16), dbname: "p" }, OPTIONS), TypeError);
+  await assert.rejects(() => sign({ accountId: "u", password: "y".repeat(16), dbname: "p:q" }, OPTIONS), TypeError);
+  await assert.rejects(() => sign({ accountId: "", password: "y".repeat(16), dbname: "p" }, OPTIONS), TypeError);
+  await assert.rejects(() => sign({ accountId: "u", password: "y".repeat(16), dbname: "p" }, { secret: "" }), TypeError);
 });
