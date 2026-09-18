@@ -1,0 +1,164 @@
+{
+  "collections": [
+    {
+      "name": "items",
+      "key": { "path": "id", "type": "string" },
+      "indexes": [
+        {
+          "name": "by_kind",
+          "fields": [
+            { "path": "kind", "type": "string", "missing": "skip" },
+            { "path": "at", "type": "number", "missing": "last" }
+          ]
+        }
+      ],
+      "rollups": [
+        {
+          "name": "per_kind",
+          "count": true,
+          "group": [{ "path": "kind", "type": "string", "missing": "skip" }],
+          "sum": ["amount"]
+        }
+      ]
+    },
+    {
+      "name": "notes",
+      "key": { "path": "id", "type": "string", "auto": "ulid" },
+      "indexes": [
+        {
+          "name": "by_item",
+          "fields": [{ "path": "item", "type": "string", "missing": "skip" }]
+        }
+      ]
+    }
+  ],
+
+  "operations": [
+    {
+      "name": "items.add",
+      "collection": "items",
+      "action": "insert",
+      "input": [
+        { "name": "id", "type": "string", "required": true },
+        { "name": "kind", "type": "string", "required": true },
+        { "name": "at", "type": "number", "required": true },
+        { "name": "amount", "type": "number", "required": true },
+        { "name": "flag", "type": "bool", "required": false },
+        { "name": "extra", "type": "any" },
+        { "name": "label", "type": "string", "default": "unlabelled" }
+      ],
+      "document": {
+        "id": { "arg": "id" },
+        "kind": { "arg": "kind" },
+        "at": { "arg": "at" },
+        "amount": { "arg": "amount" },
+        "flag": { "arg": "flag" },
+        "extra": { "arg": "extra" },
+        "label": { "arg": "label" },
+        "nested": { "value": { "deep": "buried" } }
+      }
+    },
+    {
+      "name": "items.detail",
+      "collection": "items",
+      "action": "get",
+      "projection": ["kind", "nested.deep"],
+      "input": [{ "name": "id", "type": "string", "required": true }],
+      "key": { "arg": "id" }
+    },
+    {
+      "name": "items.of_kind",
+      "collection": "items",
+      "action": "scan",
+      "index": "by_kind",
+      "limit": 10,
+      "projection": ["kind", "amount"],
+      "input": [
+        { "name": "kind", "type": "string", "required": true },
+        { "name": "since", "type": "number", "default": 0 }
+      ],
+      "from": { "terms": [{ "arg": "kind" }, { "arg": "since" }] },
+      "to": { "terms": [{ "arg": "kind" }] }
+    },
+    {
+      "name": "items.how_many",
+      "collection": "items",
+      "action": "count",
+      "index": "by_kind"
+    },
+    {
+      "name": "items.per_kind",
+      "collection": "items",
+      "action": "totals",
+      "rollup": "per_kind",
+      "limit": 10,
+      "projection": ["kind"],
+      "input": [{ "name": "kind", "type": "string", "required": false }],
+      "from": { "terms": [{ "arg": "kind" }] },
+      "to": { "terms": [{ "arg": "kind" }] }
+    },
+    {
+      "name": "items.replace",
+      "collection": "items",
+      "action": "put",
+      "input": [
+        { "name": "id", "type": "string", "required": true },
+        { "name": "kind", "type": "string", "required": true },
+        { "name": "at", "type": "number", "required": true },
+        { "name": "amount", "type": "number", "required": true }
+      ],
+      "document": {
+        "id": { "arg": "id" },
+        "kind": { "arg": "kind" },
+        "at": { "arg": "at" },
+        "amount": { "arg": "amount" }
+      }
+    },
+    {
+      "name": "items.retag",
+      "collection": "items",
+      "action": "update",
+      "input": [
+        { "name": "id", "type": "string", "required": true },
+        { "name": "kind", "type": "string", "required": true }
+      ],
+      "key": { "arg": "id" },
+      "set": { "kind": { "arg": "kind" } }
+    },
+    {
+      "name": "items.drop",
+      "collection": "items",
+      "action": "delete",
+      "input": [{ "name": "id", "type": "string", "required": true }],
+      "key": { "arg": "id" }
+    },
+    {
+      "name": "items.note",
+      "collection": "items",
+      "action": "batch",
+      "input": [
+        { "name": "id", "type": "string", "required": true },
+        { "name": "kind", "type": "string", "required": true },
+        { "name": "body", "type": "string", "required": true }
+      ],
+      "steps": [
+        {
+          "name": "item",
+          "action": "update",
+          "collection": "items",
+          "key": { "arg": "id" },
+          "exists": true,
+          "set": { "kind": { "arg": "kind" } }
+        },
+        {
+          "action": "insert",
+          "collection": "notes",
+          "document": {
+            "item": { "step": "item", "field": "key" },
+            "body": { "arg": "body" }
+          }
+        }
+      ]
+    }
+  ]
+}

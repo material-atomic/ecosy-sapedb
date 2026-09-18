@@ -13,6 +13,13 @@ const read = (path) => readFileSync(file(path), "utf8");
 
 const ledgerSchema = JSON.parse(read("../fixtures/ledger.schema.json"));
 const booksSchema = JSON.parse(read("./typecheck/books.schema.json"));
+/* The two schemas above are real ones, and between them they declare `string`,
+   `number` and five of the nine actions. Everything else the generator claims
+   to handle was being generated and read by nobody. This third one is written
+   for the claim rather than for an application — every argument type, every
+   action, and every way a schema has of saying an argument is optional — and
+   `rsql apply` accepts it, so it is not a shape invented to make a test pass. */
+const coverageSchema = JSON.parse(read("./typecheck/coverage.schema.json"));
 
 /**
  * Compiles one of the sample projects and returns what `tsc` said.
@@ -92,6 +99,79 @@ test("a row has a shape only where the operation declares a projection", () => {
   assert.match(books, /"books\.how_many": \{\n\s+args: \{\};/);
 });
 
+/* The nine of `internal/store/ops.go`, written out here rather than read from
+   the generator: a list taken from the thing under test agrees with it by
+   construction. */
+const EVERY_ACTION = ["get", "scan", "count", "totals", "insert", "put", "update", "delete", "batch"];
+
+/** The generated declaration of one operation, from its name to its closing brace. */
+function entryOf(source, name) {
+  const found = new RegExp(`"${name.replace(/\./g, "\\.")}": \\{([\\s\\S]*?)\\n  \\};`).exec(source);
+  assert.ok(found, `the generator wrote no declaration at all for ${name}`);
+  return found[1];
+}
+
+test("every action an operation may declare is one the generator writes down", () => {
+  /* First that the fixture still covers all nine. Without this the test keeps
+     its name while proving whatever is left in the file. */
+  assert.deepEqual(
+    [...new Set(coverageSchema.operations.map((operation) => operation.action))].sort(),
+    [...EVERY_ACTION].sort(),
+    "the coverage fixture has stopped covering every action, so this test proves less than it says",
+  );
+
+  const source = typesFor(coverageSchema, { name: "Coverage" });
+  for (const operation of coverageSchema.operations) {
+    assert.ok(source.includes(`"${operation.name}": {`), `a ${operation.action} produced no declaration`);
+  }
+});
+
+test("the four argument types a schema may declare each become the TypeScript that means the same thing", () => {
+  const add = entryOf(typesFor(coverageSchema, { name: "Coverage" }), "items.add");
+
+  assert.match(add, /\n\s+id: string;/);
+  assert.match(add, /\n\s+at: number;/);
+  assert.match(add, /\n\s+flag\?: boolean;/);
+  /* `any` is `unknown` and not `any`: the store means "this argument is not
+     checked", which leaves whoever reads the value back owing an account of
+     what they think it is. `any` would hand that away silently. */
+  assert.match(add, /\n\s+extra\?: unknown;/);
+});
+
+test("required is the one thing that makes an argument required, however the schema spells the rest", () => {
+  const add = entryOf(typesFor(coverageSchema, { name: "Coverage" }), "items.add");
+
+  assert.match(add, /\n\s+id: string;/, '"required": true is the only one that is required');
+  assert.match(add, /\n\s+flag\?: boolean;/, '"required": false, written out, is optional');
+  assert.match(add, /\n\s+extra\?: unknown;/, "no `required` at all is optional");
+  assert.match(add, /\n\s+label\?: string;/, "a default is optional — the store fills it in");
+});
+
+test("a get declares the rows it sends back, and a projected get names their fields", () => {
+  const detail = entryOf(typesFor(coverageSchema, { name: "Coverage" }), "items.detail");
+
+  /* `never` is how this generator says "no rows come back", and it is not a
+     harmless thing to say of a read: `never` is assignable to everything and
+     every property may be read off it, so a get written down that way turns
+     the row type off rather than getting it wrong loudly. */
+  assert.doesNotMatch(detail, /row: never;/, "a get returns rows, and `never` says it returns none");
+  assert.match(detail, /row: \{\n\s+kind\?: unknown;\n\s+"nested\.deep"\?: unknown;\n\s+\};/);
+});
+
+test("a totals row is the rollup's shape, not the projection's, even where a projection is declared", () => {
+  const operation = coverageSchema.operations.find((each) => each.name === "items.per_kind");
+  assert.ok(operation.projection?.length > 0, "the case only exists while this totals declares a projection");
+
+  /* Measured, not preferred: QA ran this against a real `rsqld` and a totals
+     that declares `projection: ["kind"]` came back as `{amount, count,
+     group}`. The store builds a rollup row from the rollup's declaration and
+     never applies the projection to it, so a projection-shaped row here would
+     be a type that contradicts the server. */
+  const totals = entryOf(typesFor(coverageSchema, { name: "Coverage" }), "items.per_kind");
+  assert.match(totals, /row: Record<string, unknown>;/);
+  assert.doesNotMatch(totals, /row: \{/, "the projection has been applied to a rollup row the store does not project");
+});
+
 test("a schema that would generate a lie is refused rather than generated", () => {
   const operation = { name: "books.find", collection: "books", action: "get" };
 
@@ -119,6 +199,11 @@ test("the checked-in declaration files are what the generator writes today", () 
     read("./typecheck/books.d.ts"),
     typesFor(booksSchema, { name: "Books", source: "tests/typecheck/books.schema.json" }),
     `tests/typecheck/books.d.ts is stale — ${regenerate}`,
+  );
+  assert.equal(
+    read("./typecheck/coverage.d.ts"),
+    typesFor(coverageSchema, { name: "Coverage", source: "tests/typecheck/coverage.schema.json" }),
+    `tests/typecheck/coverage.d.ts is stale — ${regenerate}`,
   );
 });
 

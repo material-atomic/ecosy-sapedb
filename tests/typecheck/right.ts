@@ -9,6 +9,7 @@
 import { Client, type InvokeResult, type Transport } from "@ecosy/rsql/client";
 
 import type { Books } from "./books";
+import type { Coverage, CoverageOperation } from "./coverage";
 import type { Schema } from "./ledger";
 
 declare const transport: Transport;
@@ -16,6 +17,7 @@ declare const url: string;
 
 const ledger = new (Client<Schema>({ transport, mode: "bound" }))();
 const library = new (Client<Books>({ transport, storageKey: "books" }))();
+const items = new (Client<Coverage>({ transport, mode: "bound" }))();
 
 export async function aWrite(): Promise<number | undefined> {
   const paid = await ledger.invoke(
@@ -57,6 +59,66 @@ export async function everythingElse(): Promise<number> {
   feed.close();
   ledger.stats();
   return ledger.ping(url);
+}
+
+/* Below: the coverage schema, which exists so that every argument type and
+   every action the generator claims to handle is actually called somewhere.
+   The two schemas above are real ones and between them they declare `string`,
+   `number` and five of the nine actions; the rest was being generated and
+   never compiled against. */
+
+export async function everyArgumentTypeTheStoreDeclares(): Promise<unknown> {
+  /* `string`, `number`, `bool` and `any` in one call. `flag` is the only bool
+     anything here declares, so a generator that wrote it down as a string
+     would refuse `true`. `extra` is declared `any`, which the store means as
+     "not checked", so any value at all belongs there. */
+  const added = await items.invoke(
+    url,
+    "items.add",
+    { id: "it-1", kind: "book", at: Date.now(), amount: 9.5, flag: true, extra: { whatever: [1, "two"] }, label: "gift" },
+    { write: true },
+  );
+  return added.key;
+}
+
+export async function whatMayBeLeftOut(): Promise<unknown> {
+  /* Three ways a schema says an argument is optional, all left out here:
+     `flag` says `"required": false` in so many words, `extra` says nothing
+     about required at all, and `label` carries a default the store fills in.
+     Only the four that say `"required": true` are passed. */
+  const added = await items.invoke(url, "items.add", { id: "it-2", kind: "map", at: 0, amount: 1 }, { write: true });
+  return added.key;
+}
+
+export async function aRollupRow(): Promise<unknown> {
+  /* `items.per_kind` declares a projection and the store ignores it: a rollup
+     row is built from the rollup's own declaration — a count, the group
+     values, one field per total — so `amount` is there although the
+     projection never named it. Reading it is the whole point of this call: it
+     is how a projection-shaped row for a totals would be found out. */
+  const totals = await items.invoke(url, "items.per_kind", { kind: "book" });
+  return totals.rows?.[0]?.amount;
+}
+
+export async function aProjectedGet(): Promise<unknown> {
+  // A get returns rows, and with a projection their fields are known by name.
+  const detail = await items.invoke(url, "items.detail", { id: "it-1" });
+  return detail.rows?.[0]?.["nested.deep"];
+}
+
+export async function theWritesNobodyHadCompiled(): Promise<Array<number | undefined>> {
+  /* put, update, delete and batch had never been through the generator in any
+     test. They are here so that the four of them are calls, not output. */
+  const replaced = await items.invoke(url, "items.replace", { id: "it-1", kind: "atlas", at: 1, amount: 2 }, { write: true });
+  const retagged = await items.invoke(url, "items.retag", { id: "it-1", kind: "folio" }, { write: true });
+  const dropped = await items.invoke(url, "items.drop", { id: "it-2" }, { write: true });
+  const noted = await items.invoke(url, "items.note", { id: "it-1", kind: "folio", body: "seen" }, { write: true });
+  return [replaced.changed, retagged.changed, dropped.changed, noted.changed];
+}
+
+export function anOperationName(): CoverageOperation {
+  // A name the schema declares. The line in `wrong.ts` is one it does not.
+  return "items.per_kind";
 }
 
 /* The old path, beside the new one and unchanged: any name, any arguments, and

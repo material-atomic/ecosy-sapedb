@@ -88,6 +88,16 @@ const ARGUMENT_TYPES: Record<string, string> = {
    key and a tally. Saying so in the type is what stops `result.rows[0]` from
    being written against an action that never sends one. */
 const ROWLESS = new Set(["count", "insert", "put", "update", "delete", "batch"]);
+/* PROJECTABLE is read by nothing but the line below: `rowOf` reaches the
+   projection by elimination, after rowless and after totals. So adding an
+   action to this set changes only whether ACTIONS lists it — and a mutant that
+   puts "totals" in here, which is the one QA of 0006 recorded as surviving,
+   changes no byte of any generated file, because ACTIONS already lists it.
+   That one is equivalent and no test can bite it. The rule it was named after
+   — a rollup row is not shaped by the projection — is a different mutation and
+   is bitten: see "a totals row is the rollup's shape, not the projection's" in
+   tests/types.test.mjs. The set is kept because it is what the pair of names
+   makes readable, not because anything branches on it. */
 const PROJECTABLE = new Set(["get", "scan"]);
 const ACTIONS = new Set([...ROWLESS, ...PROJECTABLE, "totals"]);
 

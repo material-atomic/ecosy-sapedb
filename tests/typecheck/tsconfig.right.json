@@ -1,4 +1,4 @@
 {
   "extends": "./tsconfig.base.json",
-  "files": ["ledger.d.ts", "books.d.ts", "right.ts"]
+  "files": ["ledger.d.ts", "books.d.ts", "coverage.d.ts", "right.ts"]
 }

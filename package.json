@@ -87,7 +87,7 @@
     "test": "yarn build && yarn test:run",
     "test:run": "node --test \"tests/*.test.mjs\"",
     "lint": "eslint src/",
-    "types:fixtures": "node bin/rsql-types.mjs fixtures/ledger.schema.json > tests/typecheck/ledger.d.ts && node bin/rsql-types.mjs tests/typecheck/books.schema.json --name Books > tests/typecheck/books.d.ts",
+    "types:fixtures": "node bin/rsql-types.mjs fixtures/ledger.schema.json > tests/typecheck/ledger.d.ts && node bin/rsql-types.mjs tests/typecheck/books.schema.json --name Books > tests/typecheck/books.d.ts && node bin/rsql-types.mjs tests/typecheck/coverage.schema.json --name Coverage > tests/typecheck/coverage.d.ts",
     "prepublishOnly": "yarn clean && yarn build && yarn test:run"
   },
   "repository": {
