@@ -16,8 +16,10 @@ const input = inputFiles.reduce((acc, file) => {
   return acc;
 }, {});
 
-// Base external packages (none for this utils package)
-const external = [];
+/* Node's own modules, and nothing else. The `./node` subpath imports them on
+   purpose; bundling them would make a build that cannot run anywhere else fail
+   at the import rather than at the first connection, which is the point. */
+const external = [/^node:/];
 
 // Minification configuration
 const minifyOptions = {
