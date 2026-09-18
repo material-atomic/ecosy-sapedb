@@ -248,7 +248,26 @@ export function Commander(options: CommanderOptions): CommanderClass {
 
   const execute = async (name: string, args: Record<string, unknown>, caller: string | null, session: Session): Promise<unknown> => {
     const command = state.commands.get(name);
-    if (!command) throw new CommandNotFound(name);
+    if (!command) {
+      /* This never reaches the try/catch below, which is the only other place
+         that pushes a trace line — so without this push a call that misses
+         the registry leaves nothing anywhere. `tryRun` exists precisely to
+         keep that miss from being noise; the trace line is what is left once
+         it is. `depth` is read before anything is pushed, the same as the
+         found-command path below, so a miss nested inside a running command
+         lands at that command's depth, not always at zero. */
+      const error = new CommandNotFound(name);
+      session.trace.push({
+        command: name,
+        caller,
+        args: Object.keys(args ?? {}),
+        ms: 0,
+        ok: false,
+        error: error.message,
+        depth: session.stack.length,
+      });
+      throw error;
+    }
 
     const need = state.auth.get(name) ?? null;
     if (need) {
@@ -325,8 +344,14 @@ export function Commander(options: CommanderOptions): CommanderClass {
         tryRun: async (name, args = {}, fallback?) => {
           try {
             return (await run(name, args, owner)) as never;
-          } catch {
-            return fallback as never;
+          } catch (error) {
+            /* Only a lookup miss is a fallback's business. Anything else —
+               a runner that threw, a caller that failed auth, a cycle — is a
+               real failure, and swallowing it would make "nobody wired this
+               up yet" and "the caller passed the wrong argument name" read as
+               the same answer to whoever is holding the fallback value. */
+            if (error instanceof CommandNotFound) return fallback as never;
+            throw error;
           }
         },
       };
@@ -368,8 +393,12 @@ export function Commander(options: CommanderOptions): CommanderClass {
     ): Promise<Result | undefined> {
       try {
         return (await run(name, args, caller ?? null)) as Result;
-      } catch {
-        return fallback;
+      } catch (error) {
+        /* Same reasoning as scope().tryRun above, duplicated because these
+           two bodies are independent — fixing one and forgetting the other
+           is exactly the bug this task exists to close. */
+        if (error instanceof CommandNotFound) return fallback;
+        throw error;
       }
     }
 

@@ -132,22 +132,204 @@ test("auth shapes: true is signed-in, a string is one permission, false and abse
   assert.equal(bus.authOf("d"), null);
 });
 
-test("a command that is not declared throws, and tryRun answers instead", async () => {
+test("a command that is not declared throws from run; tryRun and a scope's tryRun both answer the fallback, or undefined with none given", async () => {
   const { runner } = table({});
   const bus = new (Commander({ runner, logger: quiet }))();
 
   await assert.rejects(() => bus.run("nothing.here"), CommandNotFound);
   assert.equal(await bus.tryRun("nothing.here", {}, "fallback"), "fallback");
+  assert.equal(await bus.tryRun("nothing.here"), undefined);
+  assert.equal(await bus.scope("orders").tryRun("missing", {}, "fallback"), "fallback");
+});
 
-  bus.declare({ name: "boom", operation: {} });
+/* This is the test that used to assert the opposite: `failing.tryRun("boom", ...)`
+   answering "fallback" for a runner that actually failed. That was the bug — a
+   declared command whose runner blew up read exactly like a command nobody had
+   ever declared. Now it must throw, and the identity check (not a message
+   comparison) is what stops an implementation that re-wraps the error from
+   sneaking back in: a wrapped error can carry the same `.message` and still be
+   a different mistake hiding behind the fallback. */
+test("tryRun rethrows when a declared command's runner throws, keeping the runner's own error identity", async () => {
+  const boom = new Error("the store is down");
   const failing = new (Commander({
     runner: async () => {
-      throw new Error("the store is down");
+      throw boom;
     },
     logger: quiet,
   }))();
   failing.declare({ name: "boom", operation: {} });
-  assert.equal(await failing.tryRun("boom", {}, "fallback"), "fallback");
+
+  await assert.rejects(
+    () => failing.tryRun("boom", {}, "fallback"),
+    (error) => error === boom,
+  );
+});
+
+/* Six shapes of "the runner failed", each run through both independent bodies —
+   `CommanderImpl.tryRun` and `scope().tryRun` — because fixing one and leaving
+   the other on `catch { return fallback }` is exactly the bug this task closes,
+   and a test that only exercises one body would let that half-fix stand. */
+test("tryRun rethrows a plain Error thrown by the runner, through both the bus and a scope, with the same error object", async () => {
+  const boom = new Error("boom");
+  const bus = new (Commander({
+    runner: () => {
+      throw boom;
+    },
+    logger: quiet,
+  }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("x", {}, "fallback"),
+    (error) => error === boom,
+  );
+  await assert.rejects(
+    () => bus.scope("s").tryRun("x", {}, "fallback"),
+    (error) => error === boom,
+  );
+});
+
+test("tryRun rethrows a non-Error value thrown by the runner, through both the bus and a scope", async () => {
+  const bus = new (Commander({
+    runner: () => {
+      throw "một chuỗi";
+    },
+    logger: quiet,
+  }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("x", {}, "fallback"),
+    (error) => error === "một chuỗi",
+  );
+  await assert.rejects(
+    () => bus.scope("s").tryRun("x", {}, "fallback"),
+    (error) => error === "một chuỗi",
+  );
+});
+
+test("tryRun rethrows when the runner's promise rejects, through both the bus and a scope, keeping the rejection reason", async () => {
+  const boom = new Error("store timeout");
+  const bus = new (Commander({
+    runner: async () => {
+      throw boom;
+    },
+    logger: quiet,
+  }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("x", {}, "fallback"),
+    (error) => error === boom,
+  );
+  await assert.rejects(
+    () => bus.scope("s").tryRun("x", {}, "fallback"),
+    (error) => error === boom,
+  );
+});
+
+test("tryRun rethrows CommandUnauthorized, through both the bus and a scope", async () => {
+  const bus = new (Commander({ runner: () => "never runs", logger: quiet }))();
+  bus.declare({ name: "x", operation: {}, auth: ["x.read"] });
+
+  await assert.rejects(() => bus.tryRun("x", {}, "fallback"), CommandUnauthorized);
+  await assert.rejects(() => bus.scope("s").tryRun("x", {}, "fallback"), CommandUnauthorized);
+});
+
+test("tryRun rethrows CommandCycle, through both the bus and a scope", async () => {
+  const bus = new (Commander({ runner: ({ run }) => run("x"), logger: quiet }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(() => bus.tryRun("x", {}, "fallback"), CommandCycle);
+  await assert.rejects(() => bus.scope("s").tryRun("x", {}, "fallback"), CommandCycle);
+});
+
+test("tryRun rethrows a TypeError raised by the bus itself, through both the bus and a scope", async () => {
+  const bus = new (Commander({
+    runner: () => {
+      bus.scope("");
+    },
+    logger: quiet,
+  }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(() => bus.tryRun("x", {}, "fallback"), TypeError);
+  await assert.rejects(() => bus.scope("s").tryRun("x", {}, "fallback"), TypeError);
+});
+
+/* The knife: an implementation that compares `error.name === "CommandNotFound"`
+   (or `error?.name`) instead of `instanceof CommandNotFound` passes every test
+   above and still gets this one wrong. */
+test("tryRun does not mistake an Error merely named CommandNotFound for an actual lookup miss, through both the bus and a scope", async () => {
+  const impostor = new Error("[ecosy/rsql] command not declared: x");
+  impostor.name = "CommandNotFound";
+  const bus = new (Commander({
+    runner: () => {
+      throw impostor;
+    },
+    logger: quiet,
+  }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("x", {}, "fallback"),
+    (error) => error === impostor,
+  );
+  await assert.rejects(
+    () => bus.scope("s").tryRun("x", {}, "fallback"),
+    (error) => error === impostor,
+  );
+});
+
+test("tryRun does not mistake a plain object shaped like CommandNotFound for an actual lookup miss, through both the bus and a scope", async () => {
+  const impostor = { name: "CommandNotFound" };
+  const bus = new (Commander({
+    runner: () => {
+      throw impostor;
+    },
+    logger: quiet,
+  }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("x", {}, "fallback"),
+    (error) => error === impostor,
+  );
+  await assert.rejects(
+    () => bus.scope("s").tryRun("x", {}, "fallback"),
+    (error) => error === impostor,
+  );
+});
+
+test("a fallback from a missing command leaves exactly one trace line, naming the command, caller, and argument names", async () => {
+  const { runner } = table({});
+  const bus = new (Commander({ runner, logger: quiet }))();
+
+  await bus.tryRun("nothing.here", { a: 1 }, "fallback", "panel");
+  const trace = bus.traceLog();
+
+  assert.equal(trace.length, 1);
+  assert.equal(trace[0].ok, false);
+  assert.equal(trace[0].command, "nothing.here");
+  assert.equal(trace[0].caller, "panel");
+  assert.deepEqual(trace[0].args, ["a"]);
+  assert.equal(trace[0].depth, 0);
+  // No runner ever ran, so there is nothing to measure — the line is stamped
+  // with the sentinel 0, not a leftover from a clock that never started.
+  assert.equal(trace[0].ms, 0);
+});
+
+test("depth on a not-found trace line reflects how deep the miss happened, not a constant", async () => {
+  const { runner } = table({ a: ({ run }) => run("khong-co") });
+  const bus = new (Commander({ runner, logger: quiet }))();
+  bus.declare({ name: "a", operation: {} });
+
+  await assert.rejects(() => bus.run("a", {}, "root"), CommandNotFound);
+  const trace = bus.traceLog();
+
+  assert.equal(trace.length, 2);
+  const missing = trace.find((entry) => entry.command === "khong-co");
+  assert.equal(missing.depth, 1);
 });
 
 test("a command may call another; a cycle is caught with the whole chain", async () => {
