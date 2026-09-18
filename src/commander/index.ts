@@ -126,6 +126,18 @@ export interface CommandScope {
   has(name: string): boolean;
   /** Runs a command with this scope as the caller, so the trace needs no reminding. */
   run<Result = unknown>(name: string, args?: Record<string, unknown>): Promise<Result>;
+  /**
+   * The same, answering `fallback` when and only when the command is not
+   * declared; every other failure — the runner throwing, auth refusing, a
+   * cycle — rethrows. The trace line left behind by a miss on this path
+   * carries this scope's owner as `caller`, the same as {@link run} above,
+   * not an argument the caller passed in.
+   *
+   * One case this sentence does not yet describe, said here rather than left
+   * to be found: a miss *inside* a declared command's runner also answers
+   * `fallback` today, though the command that was asked for is declared. Task
+   * 0041 narrows it to the lookup this call itself made.
+   */
   tryRun<Result = unknown>(name: string, args?: Record<string, unknown>, fallback?: Result): Promise<Result | undefined>;
 }
 
@@ -143,7 +155,19 @@ export interface CommanderToken {
   authOf(name: string): AuthNeed | null;
 
   run<Result = unknown>(name: string, args?: Record<string, unknown>, caller?: string): Promise<Result>;
-  /** The same, answering `fallback` when the command is not declared or fails. */
+  /**
+   * The same, answering `fallback` when and only when the command is not
+   * declared in the registry. Every other failure — the runner throwing, auth
+   * refusing, a cycle — rethrows; a fallback that also caught those would make
+   * "nobody wired this up yet" and "the caller typo'd an argument" read as the
+   * same answer.
+   *
+   * One case this sentence does not yet describe, said here rather than left
+   * to be found: a miss *inside* a declared command's runner also answers
+   * `fallback` today, though the command that was asked for is declared — the
+   * runner did throw, and this catches it anyway. Task 0041 narrows it to the
+   * lookup this call itself made.
+   */
   tryRun<Result = unknown>(name: string, args?: Record<string, unknown>, fallback?: Result, caller?: string): Promise<Result | undefined>;
 
   /** The trace of the last root run, most recent last. */
@@ -152,13 +176,132 @@ export interface CommanderToken {
 
 export type CommanderClass = new () => CommanderToken;
 
+/*
+ * Three brands, one `Symbol.for` each, one per error class below.
+ *
+ * `rollup.config.mjs` emits this module twice — once as ESM
+ * (`dist/commander/index.mjs`), once as CJS (`dist/commander/index.js`) — and
+ * `package.json`'s `exports` wires both to the same subpath, so a single Node
+ * process that reaches this file through both `import` and `require` (which
+ * `storageKey` in `internal/global-state.ts` exists precisely to let two
+ * Commander instances do, on purpose, sharing one registry) ends up holding
+ * two different classes named `CommandNotFound`. `instanceof` between an
+ * instance from one and the class from the other is always `false`, even
+ * though both throw for exactly the same reason.
+ *
+ * `Symbol.for` looks the symbol up in the runtime's global registry by string,
+ * so a second copy of this module asking for the same string gets the exact
+ * same symbol value — not a lookalike, the same one. `Symbol()` would not:
+ * each build would mint its own, and nothing outside a single build could
+ * ever tell the difference, which is exactly why that is the sharpest
+ * mutation of this fix.
+ *
+ * Three separate symbols, not one shared between the three classes: a shared
+ * brand would make `CommandUnauthorized.is(aCommandNotFound)` answer `true`,
+ * and whoever is checking for an auth failure would swallow a lookup miss by
+ * mistake instead.
+ *
+ * The three strings are published contract, not an implementation detail.
+ * Two different *versions* of this package sitting in one `node_modules` — a
+ * dedupe that did not happen — have to recognize each other's errors the same
+ * way two builds of one version do, and a string in the global symbol
+ * registry is the only thing they share. `commander.test.mjs` pins them
+ * character for character for that reason. Changing one breaks nothing
+ * loudly: `is()` just starts answering `false`, and a `tryRun` that used to
+ * return a fallback starts throwing.
+ *
+ * Which matters for the rename in task 0038, because this package holds
+ * **two** strings that carry its npm name and both answer the same question —
+ * which copies of this package count as the same package. These three brands
+ * are one; `Symbol.for("@ecosy/rsql/<namespace>:<storageKey>")` in
+ * `internal/global-state.ts`, the key two builds share a registry under, is
+ * the other. They move together or not at all. Move only the brands and two
+ * builds go on sharing one registry while disagreeing about what a
+ * `CommandNotFound` is — the exact breakage this comment exists to prevent.
+ * Move only the registry key and two packages that no longer share a command
+ * still claim each other's errors. Moving both is also what keeps a
+ * migration install, old package and new one side by side, two separate buses
+ * with two separate identities, which is what they are.
+ *
+ * Adding a fourth error class is three edits here, and only two of them fail
+ * loudly: a `Symbol.for` line in this block, a `static is` on the class, and
+ * an `Object.defineProperty` on its prototype below the class. Forget the
+ * third and `is()` answers `false` for every instance the class ever mints,
+ * with nothing red to say so.
+ */
+const NOT_FOUND_BRAND = Symbol.for("@ecosy/rsql.CommandNotFound");
+const UNAUTHORIZED_BRAND = Symbol.for("@ecosy/rsql.CommandUnauthorized");
+const CYCLE_BRAND = Symbol.for("@ecosy/rsql.CommandCycle");
+
+/**
+ * `error[brand] === true`, not `brand in error` — an object that carries the
+ * key but sets it to `false` (or anything else) must not pass — and not a
+ * bare property read on `error` without a type check first, because `null`
+ * and `undefined` both throw on property access, and a runner is free to
+ * throw either.
+ */
+function hasBrand(error: unknown, brand: symbol): boolean {
+  return (typeof error === "object" || typeof error === "function") && error !== null && (error as Record<PropertyKey, unknown>)[brand] === true;
+}
+
+/**
+ * Thrown when `execute` cannot find `command` in the registry — the one
+ * failure {@link CommanderToken.tryRun} and {@link CommandScope.tryRun} both
+ * swallow into a fallback.
+ *
+ * This package ships two builds — one ESM, one CJS, both wired to the same
+ * subpath by `exports`, and a process reaching this module through `import`
+ * and through `require` loads both (the source next to the brand symbols says
+ * why that is on purpose; the generated `.d.ts` you may be reading this in
+ * does not carry those module-private lines) —
+ * so `error instanceof CommandNotFound` is only reliable inside a single one
+ * of them — across the boundary it is always `false`, including for an error
+ * this exact class threw a moment earlier in the other build. `CommandNotFound.is(error)`
+ * is the version that holds everywhere: the brand behind it is a claim any
+ * copy of this class can make (every copy registers the same `Symbol.for` key
+ * and stamps its own prototype with it) and that nothing else has a reason to
+ * make. Code outside this file — including a consumer's own `catch` — should
+ * prefer `is()` to `instanceof` for the same reason.
+ */
 export class CommandNotFound extends Error {
   constructor(readonly command: string) {
     super(`[ecosy/rsql] command not declared: ${command}`);
     this.name = "CommandNotFound";
   }
-}
 
+  static is(error: unknown): error is CommandNotFound {
+    return hasBrand(error, NOT_FOUND_BRAND);
+  }
+}
+/*
+ * On the prototype, not set per-instance in the constructor: `is()` has to
+ * recognize anything that INHERITS the brand, not only what this
+ * constructor personally minted. The real case is an error that crossed a
+ * worker, a process, or `structuredClone` — all three drop the concrete
+ * class but leave a plain object behind, and the receiving side recovers it
+ * by hand with `Object.setPrototypeOf(plain, CommandNotFound.prototype)`.
+ * That object never ran through `new CommandNotFound(...)`, so a brand
+ * stamped per-instance in the constructor would not be on it; a brand on
+ * the prototype is, because it walks the same chain `setPrototypeOf` just
+ * joined.
+ *
+ * `Object.keys` and `JSON.stringify` never see a symbol key no matter where
+ * it lives, and a non-enumerable one is invisible to a spread too — so none
+ * of the three tell this placement apart from stamping the brand on the
+ * instance instead, and none of them were ever evidence for choosing one
+ * over the other. What IS evidence: `Object.getOwnPropertySymbols` on an
+ * instance reports `[]` here and would report the brand if it were set in
+ * the constructor instead (that function ignores `enumerable` entirely —
+ * it lists every own symbol key), and `is()` on a bare `setPrototypeOf`
+ * object answers `true` here and would answer `false` there, because that
+ * object owns nothing of its own; everything it has, it has by inheriting
+ * from the prototype. `enumerable: false` is what keeps this property out
+ * of a spread; it buys nothing against `Object.getOwnPropertySymbols` or
+ * against `is()`, since neither one filters by `enumerable`.
+ */
+Object.defineProperty(CommandNotFound.prototype, NOT_FOUND_BRAND, { value: true, enumerable: false });
+
+/** See {@link CommandNotFound} for why this is a brand-checked `is()` rather than `instanceof`. */
 export class CommandUnauthorized extends Error {
   constructor(
     readonly command: string,
@@ -169,14 +312,25 @@ export class CommandUnauthorized extends Error {
     );
     this.name = "CommandUnauthorized";
   }
-}
 
+  static is(error: unknown): error is CommandUnauthorized {
+    return hasBrand(error, UNAUTHORIZED_BRAND);
+  }
+}
+Object.defineProperty(CommandUnauthorized.prototype, UNAUTHORIZED_BRAND, { value: true, enumerable: false });
+
+/** See {@link CommandNotFound} for why this is a brand-checked `is()` rather than `instanceof`. */
 export class CommandCycle extends Error {
   constructor(readonly chain: readonly string[]) {
     super(`[ecosy/rsql] command cycle: ${chain.join(" → ")}`);
     this.name = "CommandCycle";
   }
+
+  static is(error: unknown): error is CommandCycle {
+    return hasBrand(error, CYCLE_BRAND);
+  }
 }
+Object.defineProperty(CommandCycle.prototype, CYCLE_BRAND, { value: true, enumerable: false });
 
 function normaliseAuth(auth: AuthRequirement | undefined): AuthNeed | null {
   if (auth === undefined || auth === false) return null;
@@ -350,7 +504,7 @@ export function Commander(options: CommanderOptions): CommanderClass {
                real failure, and swallowing it would make "nobody wired this
                up yet" and "the caller passed the wrong argument name" read as
                the same answer to whoever is holding the fallback value. */
-            if (error instanceof CommandNotFound) return fallback as never;
+            if (CommandNotFound.is(error)) return fallback as never;
             throw error;
           }
         },
@@ -397,7 +551,7 @@ export function Commander(options: CommanderOptions): CommanderClass {
         /* Same reasoning as scope().tryRun above, duplicated because these
            two bodies are independent — fixing one and forgetting the other
            is exactly the bug this task exists to close. */
-        if (error instanceof CommandNotFound) return fallback;
+        if (CommandNotFound.is(error)) return fallback;
         throw error;
       }
     }

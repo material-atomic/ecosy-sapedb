@@ -140,6 +140,11 @@ test("a command that is not declared throws from run; tryRun and a scope's tryRu
   assert.equal(await bus.tryRun("nothing.here", {}, "fallback"), "fallback");
   assert.equal(await bus.tryRun("nothing.here"), undefined);
   assert.equal(await bus.scope("orders").tryRun("missing", {}, "fallback"), "fallback");
+  // The name promises "or undefined with none given" for BOTH tryRun and a
+  // scope's tryRun, not just the bus's — round 1 asserted this on the bus
+  // path only, leaving the scope path free to answer `null` or anything else
+  // and still pass a test whose name claimed to cover it.
+  assert.equal(await bus.scope("orders").tryRun("missing"), undefined);
 });
 
 /* This is the test that used to assert the opposite: `failing.tryRun("boom", ...)`
@@ -301,6 +306,131 @@ test("tryRun does not mistake a plain object shaped like CommandNotFound for an 
   );
 });
 
+test("tryRun rethrows null thrown by the runner, through both the bus and a scope, keeping the value null rather than turning it into some other error", async () => {
+  const bus = new (Commander({
+    runner: () => {
+      throw null;
+    },
+    logger: quiet,
+  }))();
+  bus.declare({ name: "x", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("x", {}, "fallback"),
+    (error) => error === null,
+  );
+  await assert.rejects(
+    () => bus.scope("s").tryRun("x", {}, "fallback"),
+    (error) => error === null,
+  );
+});
+
+/* This is the contract, asserted directly at the `is()` layer rather than
+   through tryRun: a plain object that deliberately carries the exact brand
+   key set to `true` IS a CommandNotFound as far as `is()` is concerned. That
+   is the whole point of a brand rather than a class check — and it must not
+   be confused with the impostor tests above, which assert the opposite thing
+   (a lookalike that does NOT carry the brand is rejected). Mixing the two
+   into one test would leave neither claim readable. */
+test("CommandNotFound.is() answers true for a bare object that carries the exact brand key — the contract a brand exists to make, not a shortcut through tryRun", () => {
+  const branded = { [Symbol.for("@ecosy/rsql.CommandNotFound")]: true };
+  assert.equal(CommandNotFound.is(branded), true);
+});
+
+test("CommandNotFound.is() answers false for null, undefined, and primitives without throwing", () => {
+  for (const value of [null, undefined, "x", 0, false, Symbol("x")]) {
+    assert.equal(CommandNotFound.is(value), false);
+  }
+});
+
+/* The knife for `BRAND in error` in place of `error[BRAND] === true`: `in`
+   only asks whether the key exists, so an object that carries the key but
+   sets it to `false` would wrongly pass. The brand is a claim of `true`,
+   not merely a key's presence. */
+test("CommandNotFound.is() answers false for an object whose brand key is present but explicitly false", () => {
+  const impostor = { [Symbol.for("@ecosy/rsql.CommandNotFound")]: false };
+  assert.equal(CommandNotFound.is(impostor), false);
+});
+
+/* The brand living on the prototype rather than the instance IS observable —
+   just not through `Object.keys`, a spread, or `JSON.stringify` (all three
+   strip symbol keys no matter where those keys live, so none of them can
+   tell the two placements apart). Two things do tell them apart:
+   `Object.getOwnPropertySymbols` only reports symbols the instance itself
+   carries, and `is()` must answer `true` for a plain object that inherits
+   the brand through `Object.setPrototypeOf` without ever having run through
+   `new CommandNotFound(...)` — that is the shape an error takes coming back
+   from `structuredClone` across a worker or process boundary, which drops
+   the prototype chain of the concrete class but not a `setPrototypeOf` onto
+   this exact prototype done by hand on the receiving side. A brand stamped
+   per-instance in the constructor would fail both: it would show up in
+   `getOwnPropertySymbols`, and a plain object given this prototype afterward
+   would not inherit anything, because there would be nothing on the
+   prototype to inherit. */
+test("CommandNotFound's brand lives on the prototype: an instance carries no own symbol keys, and a plain object reparented onto the prototype is recognized without being constructed", () => {
+  const err = new CommandNotFound("x");
+  assert.deepEqual(Object.getOwnPropertySymbols(err), []);
+
+  const reparented = Object.setPrototypeOf({}, CommandNotFound.prototype);
+  assert.equal(CommandNotFound.is(reparented), true);
+});
+
+/* Falsy fallbacks must come back exactly as given, through both independent
+   bodies. `?? null`, `|| something`, or `return null` in place of `return
+   fallback` all pass every earlier test (none of them pass a falsy fallback)
+   and all fail this one. `strictEqual` (not `equal`) so a `null` given cannot
+   quietly land as `undefined`. */
+test("tryRun returns a falsy fallback unchanged, through both the bus and a scope", async () => {
+  const { runner } = table({});
+  const bus = new (Commander({ runner, logger: quiet }))();
+
+  const cases = [
+    ["not given", []],
+    ["null", [null]],
+    ["0", [0]],
+    ["false", [false]],
+    ["empty string", [""]],
+  ];
+
+  for (const [label, fallbackArgs] of cases) {
+    assert.strictEqual(await bus.tryRun("missing", {}, ...fallbackArgs), fallbackArgs[0], `bus, ${label}`);
+    assert.strictEqual(await bus.scope("orders").tryRun("missing", {}, ...fallbackArgs), fallbackArgs[0], `scope, ${label}`);
+  }
+});
+
+/* `caller` on the trace line of a lookup miss reached through a scope must be
+   that scope's owner — not a constant, not the argument the caller happened
+   to pass (scope().tryRun takes no caller argument at all), and not dropped
+   to null. Two different owners producing two different values is what rules
+   out a lucky constant. */
+test("a scope's tryRun traces its own owner as caller on a lookup miss, and two scopes trace two different owners", async () => {
+  const { runner } = table({});
+  const bus = new (Commander({ runner, logger: quiet }))();
+
+  await bus.scope("orders").tryRun("missing", { a: 1 }, "fallback");
+  let trace = bus.traceLog();
+  assert.equal(trace.length, 1);
+  assert.equal(trace[0].command, "missing");
+  assert.equal(trace[0].caller, "orders");
+  assert.deepEqual(trace[0].args, ["a"]);
+  assert.equal(trace[0].ok, false);
+  assert.equal(trace[0].depth, 0);
+
+  await bus.scope("billing").tryRun("missing");
+  trace = bus.traceLog();
+  assert.equal(trace[0].caller, "billing", "a different scope must trace a different caller, not a constant");
+
+  // scope().run (not tryRun) already had a test reading the owner through the
+  // runner's own record of `caller` (below, "a scope binds the caller and the
+  // owner…"); this is the same claim read through the trace instead, which is
+  // the thing a fallback path actually has to go on.
+  const { runner: listRunner } = table({ "orders.list": [] });
+  const withList = new (Commander({ runner: listRunner, logger: quiet }))();
+  withList.scope("orders").declare(listOrders);
+  await withList.scope("orders").run("orders.list");
+  assert.equal(withList.traceLog()[0].caller, "orders");
+});
+
 test("a fallback from a missing command leaves exactly one trace line, naming the command, caller, and argument names", async () => {
   const { runner } = table({});
   const bus = new (Commander({ runner, logger: quiet }))();
@@ -317,6 +447,12 @@ test("a fallback from a missing command leaves exactly one trace line, naming th
   // No runner ever ran, so there is nothing to measure — the line is stamped
   // with the sentinel 0, not a leftover from a clock that never started.
   assert.equal(trace[0].ms, 0);
+  // Compared against a freshly constructed instance's own `.message`, not a
+  // literal — that way it dies for `""`, for `error.name`
+  // ("nothing.here" is not the message), and for `String(error)` (which
+  // prepends "CommandNotFound: "), without the test needing an update if the
+  // wording of the message itself ever changes.
+  assert.equal(trace[0].error, new CommandNotFound("nothing.here").message);
 });
 
 test("depth on a not-found trace line reflects how deep the miss happened, not a constant", async () => {
