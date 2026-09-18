@@ -202,3 +202,67 @@ test("the same write id twice writes once", { skip }, async () => {
     await client.close();
   }
 });
+
+test("a subscription catches up and then keeps up", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    const seen = [];
+    const ended = [];
+
+    const feed = await client.subscribe(url, { from: 1, onEnd: (reason) => ended.push(reason) }, (change) =>
+      seen.push(change),
+    );
+
+    assert.equal(feed.from, 1);
+    assert.ok(feed.latest >= 1, "the store reported no entries");
+
+    /* The catch-up: everything already in the log, in order, with nothing
+       invented and nothing skipped. */
+    await waitFor(() => seen.length >= feed.latest, "the catch-up never finished");
+    for (let i = 0; i < feed.latest; i++) {
+      assert.equal(seen[i].lsn, i + 1, `entry ${i + 1} arrived as ${seen[i].lsn}`);
+    }
+
+    // And then what happens next, without asking again.
+    const written = await client.invoke(url, "notes.add", { body: "live", topic: "feed" }, { write: true });
+    await waitFor(() => seen.some((c) => c.key === written.key), "the live change never arrived");
+
+    const live = seen.find((c) => c.key === written.key);
+    assert.equal(live.kind, "put");
+    assert.equal(live.document.body, "live");
+    /* Who did it, and under which declared operation — the audit trail is the
+       same log, not a second one that can disagree with it. */
+    assert.equal(live.by.operation, "notes.add");
+
+    feed.close();
+    assert.deepEqual(ended, [], "the feed ended on its own");
+  } finally {
+    await client.close();
+  }
+});
+
+test("a subscription is told when the connection goes", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  const ended = [];
+  await client.subscribe(url, { from: 1, onEnd: (reason) => ended.push(reason) }, () => {});
+
+  /* Closing the client takes the connection with it. A feed left silent would
+     have somebody waiting for changes that will never come, on a database
+     busily making them. */
+  await client.close();
+  await waitFor(() => ended.length > 0, "the feed was not told the connection had gone");
+});
+
+/** waitFor polls a condition, so a test that is wrong fails instead of hanging. */
+async function waitFor(condition, message, timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}

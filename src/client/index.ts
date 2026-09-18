@@ -97,6 +97,33 @@ export interface InvokeOptions {
   timeout?: number;
 }
 
+export interface SubscribeOptions {
+  /** The first entry to receive. A replica restored from a dump starts at the dump's entry plus one. */
+  from: number;
+  /** Called when the feed ends: the connection went, or the store said it could no longer serve it. */
+  onEnd?: (reason: unknown) => void;
+}
+
+/** One change, as the store recorded it. */
+export interface Change {
+  lsn: number;
+  at?: number;
+  kind: string;
+  collection?: string;
+  key?: unknown;
+  document?: Record<string, unknown>;
+  by?: { operation?: string; version?: number; actor?: string; write_id?: string };
+}
+
+export interface Subscription {
+  /** Where the feed started, and where the store had reached when it did. */
+  from: number;
+  latest: number;
+  oldest: number;
+  /** Stops the feed. The connection stays for whatever else is using it. */
+  close(): void;
+}
+
 export interface PoolStats {
   /** Open connections, by pool key. */
   connections: number;
@@ -114,6 +141,21 @@ export interface ClientToken {
     args?: Record<string, unknown>,
     options?: InvokeOptions,
   ): Promise<Result>;
+  /**
+   * Follows the change log from an entry onwards.
+   *
+   * Every change the store makes, in order, once — the same log a replica
+   * replays. What it is not is a promise that the store waits: entries are
+   * trimmed to whatever retention it was given, and a subscriber that falls
+   * behind that is ended with `too_far_behind` rather than quietly resumed
+   * from wherever the log now starts. Being told is what makes it possible to
+   * go and fetch a dump; being skipped ahead silently is not.
+   */
+  subscribe(
+    target: string | ConnectionTarget,
+    options: SubscribeOptions,
+    onChange: (change: Change) => void,
+  ): Promise<Subscription>;
   /** Round trip to the store — the same path everything else uses, so a health check proves the real thing. */
   ping(target: string | ConnectionTarget): Promise<number>;
   /** Closes every connection. Calls in flight are rejected. */
@@ -129,12 +171,19 @@ interface Pending {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
+/** A subscription that is running on a connection. */
+interface Feed {
+  onChange(change: unknown): void;
+  onEnd(reason?: unknown): void;
+}
+
 interface Entry {
   key: string;
   target: ConnectionTarget;
   connection: Connection | null;
   opening: Promise<Connection> | null;
   pending: Map<number, Pending>;
+  feeds?: Map<number, Feed>;
   nextId: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   keepAliveTimer: ReturnType<typeof setInterval> | null;
@@ -191,6 +240,14 @@ export function Client(options: ClientOptions): ClientClass {
       if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
     }
+
+    /* A feed on a connection that has gone is a feed that has stopped. Leaving
+       it silent would have somebody waiting for changes that will never come,
+       on a database that is busily making them. */
+    if (entry.feeds) {
+      for (const feed of entry.feeds.values()) feed.onEnd(error);
+      entry.feeds.clear();
+    }
     entry.pending.clear();
   };
 
@@ -227,10 +284,37 @@ export function Client(options: ClientOptions): ClientClass {
   };
 
   const handle = (entry: Entry, frame: Frame) => {
-    if (frame.id === 0) return; // Events belong to a subscription, not to a call.
+    if (frame.id === 0) return; // Nobody asked for this, so nobody is waiting.
+
+    /* An event belongs to a subscription, which stays open long after the
+       call that opened it was answered. Routed by the same id, because that
+       is what lets one connection carry several feeds at once. */
+    if (frame.type === FrameType.event) {
+      const feed = entry.feeds?.get(frame.id);
+      if (feed) {
+        try {
+          feed.onChange(decodeJsonPayload(frame));
+        } catch (error) {
+          logger.warn("[ecosy/rsql] a subscription handler threw", error);
+        }
+      }
+      return;
+    }
 
     const pending = entry.pending.get(frame.id);
-    if (!pending) return;
+    if (!pending) {
+      /* A failure on a subscription arrives long after its call was answered:
+         the feed has ended and whoever is reading it has to be told. */
+      if (frame.type === FrameType.failure) {
+        const feed = entry.feeds?.get(frame.id);
+        if (feed) {
+          entry.feeds?.delete(frame.id);
+          const body = decodeJsonPayload<{ message?: string; code?: string }>(frame);
+          feed.onEnd(new Refused(body?.message ?? "the feed ended", body?.code ?? "refused"));
+        }
+      }
+      return;
+    }
 
     entry.pending.delete(frame.id);
     if (pending.timer) clearTimeout(pending.timer);
@@ -353,12 +437,19 @@ export function Client(options: ClientOptions): ClientClass {
     return entry.nextId;
   }
 
-  const send = async (target: ConnectionTarget, type: number, body: Record<string, unknown>, timeout: number) => {
-    const entry = entryFor(target);
-    const connection = await open(entry);
-    const id = nextId(entry);
-
-    return new Promise<unknown>((resolve, reject) => {
+  /* Split out so that a subscription can take its id before the frame goes
+     out: the store starts sending the moment it has answered, and an event
+     that arrives before its handler is in place is a change nobody sees. */
+  const sendOn = (
+    entry: Entry,
+    connection: Connection,
+    id: number,
+    type: number,
+    body: Record<string, unknown>,
+    timeout: number,
+    target: ConnectionTarget,
+  ) =>
+    new Promise<unknown>((resolve, reject) => {
       const pending: Pending = { resolve, reject, timer: null };
 
       if (timeout > 0) {
@@ -380,6 +471,11 @@ export function Client(options: ClientOptions): ClientClass {
         reject(new Unavailable("the connection broke while sending", { cause: error }));
       }
     });
+
+  const send = async (target: ConnectionTarget, type: number, body: Record<string, unknown>, timeout: number) => {
+    const entry = entryFor(target);
+    const connection = await open(entry);
+    return sendOn(entry, connection, nextId(entry), type, body, timeout, target);
   };
 
   const resolveTarget = (target: string | ConnectionTarget) =>
@@ -414,6 +510,54 @@ export function Client(options: ClientOptions): ClientClass {
         if (error instanceof Unavailable && (!invokeOptions.write || writeId)) {
           return (await send(parsed, FrameType.invoke, body, invokeOptions.timeout ?? requestTimeout)) as Result;
         }
+        throw error;
+      }
+    }
+
+    async subscribe(
+      target: string | ConnectionTarget,
+      options: SubscribeOptions,
+      onChange: (change: Change) => void,
+    ): Promise<Subscription> {
+      if (typeof onChange !== "function") {
+        throw new TypeError("[ecosy/rsql] subscribe needs somewhere to put the changes");
+      }
+
+      const parsed = resolveTarget(target);
+      const entry = entryFor(parsed);
+      const connection = await open(entry);
+
+      const body: Record<string, unknown> = { from: options.from };
+      if (mode === "account") {
+        body.dbname = parsed.dbname;
+        body.sig = parsed.sig;
+      }
+
+      /* Registered before the request goes out. The store starts sending the
+         moment it has answered, and an event that arrives before the handler
+         is in place is a change nobody sees. */
+      const id = nextId(entry);
+      entry.feeds ??= new Map();
+      entry.feeds.set(id, {
+        onChange: onChange as (change: unknown) => void,
+        onEnd: (reason) => options.onEnd?.(reason),
+      });
+
+      try {
+        const confirmed = (await sendOn(entry, connection, id, FrameType.subscribe, body, requestTimeout, parsed)) as {
+          from: number;
+          latest: number;
+          oldest: number;
+        };
+
+        return {
+          ...confirmed,
+          close: () => {
+            entry.feeds?.delete(id);
+          },
+        };
+      } catch (error) {
+        entry.feeds?.delete(id);
         throw error;
       }
     }
