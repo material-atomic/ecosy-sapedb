@@ -78,11 +78,117 @@ function fakeStore({ answer, failConnect = 0, dropFirstCall = false } = {}) {
         },
       };
 
+      // For a test that wants a close with no failure ever sent on the wire:
+      // the real socket cases (dropFirstCall, and this) are the only ways
+      // fakeStore ends a connection, and neither one runs through a Failure
+      // frame first.
+      record.forceClose = (reason) => {
+        record.closed = true;
+        closeHandlers.forEach((handler) => handler(reason));
+      };
+
       return connection;
     },
   };
 
   return { transport, connections, attempts: () => attempts };
+}
+
+/**
+ * A store that refuses every handshake it is offered: it answers whatever it
+ * is sent with a Failure at id 0 and then closes, the way sapedbd looks at
+ * mode `bound` when a signature does not verify. The reply is put off with
+ * `setTimeout` rather than a microtask on purpose — `open()` does not wait
+ * for a Welcome before handing the connection back, so the driver's own call
+ * frame goes out on the same connection right after hello; a microtask reply
+ * could in principle race ahead of that send, and a macrotask cannot.
+ */
+function refusingStore({ message = "sapedb: signature does not verify", code = "signature" } = {}) {
+  let attempts = 0;
+
+  const transport = {
+    async connect() {
+      attempts++;
+      const frameHandlers = [];
+      const closeHandlers = [];
+      let refused = false;
+
+      const connection = {
+        send(bytes) {
+          for (const frame of new FrameDecoder().push(bytes)) {
+            if (frame.type === FrameType.hello && !refused) {
+              refused = true;
+              setTimeout(() => {
+                frameHandlers.forEach((handler) => handler(encodeJsonFrame(FrameType.failure, 0, { message, code })));
+                closeHandlers.forEach((handler) => handler("handshake rejected"));
+              }, 0);
+            }
+            // Any other frame sent on this connection — the real call
+            // `open()` let through without waiting for a Welcome — is left
+            // unanswered; the refusal above is what ends it.
+          }
+        },
+        onFrame(handler) {
+          frameHandlers.push((bytes) => new FrameDecoder().push(bytes).forEach(handler));
+        },
+        onClose(handler) {
+          closeHandlers.push(handler);
+        },
+        close() {},
+      };
+
+      return connection;
+    },
+  };
+
+  return { transport, attempts: () => attempts };
+}
+
+/**
+ * A store that answers hello with a Welcome and then answers nothing else on
+ * its own — every other frame just sits there until the test calls
+ * `connection.emit(...)` or `connection.forceClose(...)` itself. fakeStore's
+ * generic auto-reply (queued the instant a frame is sent) is exactly what
+ * these two tests need to not happen: they need a call still sitting in
+ * `entry.pending` at the moment the connection ends, on purpose.
+ */
+function silentStore() {
+  const connections = [];
+
+  const transport = {
+    async connect() {
+      const frameHandlers = [];
+      const closeHandlers = [];
+      const record = { calls: [] };
+      connections.push(record);
+
+      const connection = {
+        send(bytes) {
+          for (const frame of new FrameDecoder().push(bytes)) {
+            if (frame.type === FrameType.hello) {
+              queueMicrotask(() => frameHandlers.forEach((handler) => handler(encodeJsonFrame(FrameType.welcome, 0, { ok: true }))));
+              continue;
+            }
+            record.calls.push(frame);
+          }
+        },
+        onFrame(handler) {
+          frameHandlers.push((bytes) => new FrameDecoder().push(bytes).forEach(handler));
+        },
+        onClose(handler) {
+          closeHandlers.push(handler);
+        },
+        close() {},
+      };
+
+      record.emit = (type, id, body) => frameHandlers.forEach((handler) => handler(encodeJsonFrame(type, id, body)));
+      record.forceClose = (reason) => closeHandlers.forEach((handler) => handler(reason));
+
+      return connection;
+    },
+  };
+
+  return { transport, connections };
 }
 
 test("nothing opens until the first call", async () => {
@@ -280,4 +386,109 @@ test("a client needs a transport, and a call needs a command", async () => {
   assert.throws(() => Client({}), TypeError);
   const client = new (Client({ transport: fakeStore().transport, logger: quiet }))();
   await assert.rejects(() => client.invoke(url(), ""), TypeError);
+});
+
+// --- 0048: a rejected handshake used to reach the caller as an unhelpful
+// Unavailable, when the store had already said exactly why and with what
+// code. See CHANGELOG.md and internal/server task 0048 on the Go side. ---
+
+test("a handshake the store refuses settles the call that opened it with Refused, not a vague Unavailable", async () => {
+  const store = refusingStore({ message: "sapedb: signature does not verify", code: "signature" });
+  const client = new (Client({ transport: store.transport, mode: "bound", logger: quiet }))();
+
+  await assert.rejects(
+    () => client.invoke(url(), "orders.list"),
+    (error) =>
+      error instanceof Refused &&
+      // T5: the code has to be the server's, not dropped.
+      error.code === "signature" &&
+      // T6: the server's own wording, not the driver's fallback text — the
+      // two must not read alike, or this assertion would pass by accident.
+      error.message.includes("signature does not verify") &&
+      !error.message.includes("the store refused the connection"),
+  );
+});
+
+test("a store that keeps refusing rejects the next call the same way, not just the first", async () => {
+  const store = refusingStore({ message: "sapedb: signature does not verify", code: "signature" });
+  const client = new (Client({ transport: store.transport, mode: "bound", logger: quiet }))();
+
+  await assert.rejects(() => client.invoke(url(), "a"), (error) => error instanceof Refused && error.code === "signature");
+  // The first attempt's Entry was torn down and deleted; this is a second,
+  // unrelated connection attempt reaching the very same refusal.
+  await assert.rejects(() => client.invoke(url(), "b"), (error) => error instanceof Refused && error.code === "signature");
+  assert.ok(store.attempts() >= 2, "each call opened its own connection, and each one was refused");
+});
+
+test("a refused handshake does not trip the breaker — only open() throwing does, and open() does not throw here", async () => {
+  const store = refusingStore();
+  const client = new (Client({
+    transport: store.transport,
+    mode: "bound",
+    breaker: { failures: 2, cooldown: 10_000 },
+    logger: quiet,
+  }))();
+
+  for (let i = 0; i < 5; i++) {
+    await assert.rejects(() => client.invoke(url(), "a"), Refused);
+  }
+  assert.deepEqual(client.stats().tripped, [], "a Refused is the store answering, not open() failing — the breaker never saw it");
+});
+
+test("a socket closing with no Failure ever sent still settles with the old, generic Unavailable", async () => {
+  // The counter-case mục 6 asks for: without this, a mutant that remembers
+  // a "refusal" for any id-0 frame — Welcome included — would misread an
+  // ordinary handshake this way too.
+  //
+  // ping(), not invoke(): invoke() retries once, on its own, whenever the
+  // error is Unavailable — that is the whole point of the retry — so it
+  // would silently swallow this test's Unavailable behind a second, quietly
+  // successful attempt. ping() carries no such retry. And silentStore, not
+  // fakeStore: fakeStore answers every frame the moment it is sent, so the
+  // ping would already have resolved before this test got a chance to close
+  // the socket out from under it.
+  const store = silentStore();
+  const client = new (Client({ transport: store.transport, logger: quiet }))();
+
+  const pending = client.ping(url());
+  await sleep(0); // let the ping frame actually go out and land in entry.pending
+  const [connection] = store.connections;
+  connection.forceClose("the process was killed");
+
+  await assert.rejects(pending, (error) => error instanceof Unavailable && /closed the connection/.test(error.message));
+});
+
+test("a Failure with a real id is not remembered as a handshake refusal for an unrelated later close", async () => {
+  // T7, the boundary mutant task 0048 names explicitly: capturing a
+  // "refusal" for any id 0 frame is the in-bounds bug; capturing one for a
+  // real id too is the out-of-bounds version, and it is nastier — the old
+  // failure's message and code would sit in entry.refusal and mislead
+  // whichever later, unrelated call happens to be pending when the
+  // connection eventually drops for its own, different reason.
+  const store = silentStore();
+  const client = new (Client({ transport: store.transport, logger: quiet }))();
+
+  // subscribe(), not invoke(): it carries no retry either, and it is what
+  // gives this test a real id to answer by hand, on a store that otherwise
+  // answers nothing on its own.
+  const first = client.subscribe(url(), { from: 0 }, () => {});
+  await sleep(0);
+  const [connection] = store.connections;
+  const subscribeFrame = connection.calls.at(-1);
+  connection.emit(FrameType.failure, subscribeFrame.id, { message: "no such command", code: "unknown_command" });
+
+  await assert.rejects(first, (error) => error instanceof Refused && error.code === "unknown_command");
+
+  // That failure carried a real id and rejected its own call normally; the
+  // connection itself is still open (a Refused from a named call does not
+  // teardown anything). A ping stands in for a second, unrelated call.
+  const second = client.ping(url());
+  await sleep(0);
+  connection.forceClose("unrelated network hiccup");
+
+  await assert.rejects(
+    second,
+    (error) => error instanceof Unavailable && /closed the connection/.test(error.message),
+    "the old command-not-found failure must not resurface as this call's rejection",
+  );
 });

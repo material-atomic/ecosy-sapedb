@@ -46,6 +46,21 @@
   its trace lines are written to that new call and discarded, so the nested
   miss is missing from the `traceLog()` the outer caller reads.
 
+### Fixed
+
+- A connection the store refuses during the handshake — mode `bound`, a
+  signature that does not verify — now rejects with `Refused`, carrying the
+  store's own message and code. Before this, the store's answer arrived on
+  the wire (a Failure frame at id 0) and was discarded, because id 0 is also
+  what a Welcome carries and nothing was waiting on it; every caller instead
+  saw the socket close and got `Unavailable("the store closed the
+  connection")`, with no code at all — a store answering "no" and a store
+  going away for no stated reason looked identical.
+
+  To upgrade: code that catches this case by checking `instanceof
+  Unavailable` (or matching its message) needs to catch `instanceof Refused`
+  instead, and can read `error.code` for what the store actually said.
+
 ### Added
 
 - `CommandNotFound.is()`, `CommandUnauthorized.is()`, `CommandCycle.is()`.

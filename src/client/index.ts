@@ -282,6 +282,18 @@ interface Entry {
   nextId: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   keepAliveTimer: ReturnType<typeof setInterval> | null;
+  /**
+   * What the store said when it refused this connection during the
+   * handshake — a Failure frame with id 0, which is the only id a rejected
+   * handshake can carry, because nothing had assigned this connection a
+   * real one yet. `open()` does not wait for a Welcome before handing the
+   * connection back, so this is the only place that reason is ever seen
+   * before the socket closes and takes it with it. Set in `handle`, read in
+   * the `onClose` handler below, and never touched again after that: a
+   * fresh `Entry` is what the next connection attempt gets, once this one
+   * is torn down.
+   */
+  refusal?: Refused;
 }
 
 interface Breaker {
@@ -395,7 +407,21 @@ export function Client(options: ClientOptions): ClientClass {
   };
 
   const handle = (entry: Entry, frame: Frame) => {
-    if (frame.id === 0) return; // Nobody asked for this, so nobody is waiting.
+    if (frame.id === 0) {
+      /* A Welcome is id 0 too, and carries nothing worth remembering — this
+         branch is only for a Failure, which at id 0 can only mean one thing:
+         the handshake itself was refused. `open()` sends hello and hands the
+         connection back without waiting for either frame, so the call this
+         connection was opened for is already on its way; without this, the
+         reason the store gave would be read here and then thrown away, and
+         `onClose` below would have nothing left to settle that call with but
+         "the store closed the connection". */
+      if (frame.type === FrameType.failure) {
+        const body = decodeJsonPayload<{ message?: string; code?: string }>(frame);
+        entry.refusal = new Refused(body?.message ?? "the store refused the connection", body?.code ?? "refused");
+      }
+      return; // Nobody asked for this, so nobody is waiting.
+    }
 
     /* An event belongs to a subscription, which stays open long after the
        call that opened it was answered. Routed by the same id, because that
@@ -467,7 +493,16 @@ export function Client(options: ClientOptions): ClientClass {
       connection.onFrame((frame) => handle(entry, frame));
       connection.onClose((reason) => {
         if (state.entries.get(entry.key) === entry) {
-          teardown(entry, new Unavailable("the store closed the connection", { cause: reason }));
+          /* A refusal is the store answering "no" and saying why; a socket
+             closing with no refusal on record is the store just going away.
+             Those are different failures — one a caller should not retry,
+             the other one it might — so they must not collapse into the
+             same vague message just because both end the same way, in a
+             closed connection. The close reason is not lost either way: it
+             rides along as `cause` even when the error thrown is Refused. */
+          const error = entry.refusal ?? new Unavailable("the store closed the connection", { cause: reason });
+          if (entry.refusal) error.cause = reason;
+          teardown(entry, error);
         }
       });
 

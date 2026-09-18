@@ -24,6 +24,7 @@ import { createServer } from "node:net";
 import { Client } from "../dist/client/index.mjs";
 import { nodeTransport } from "../dist/node/index.mjs";
 import { sign } from "../dist/signer/index.mjs";
+import { Refused } from "../dist/errors.mjs";
 
 const SERVER = process.env.SAPEDB_SERVER_BIN;
 const CLI = process.env.SAPEDB_CLI_BIN;
@@ -178,7 +179,24 @@ test("a connection string nobody signed for is refused", { skip }, async () => {
 
   try {
     const forged = url.replace(/sig=[0-9a-f]+/, `sig=${"ab".repeat(32)}`);
-    await assert.rejects(() => client.invoke(forged, "notes.by_topic", { topic: "bound" }));
+    /* Task 0048: this used to arrive as a bare Unavailable("the store closed
+       the connection") — true, but not why. The real server here answers
+       with a Failure at handshake time, and the driver now remembers it: the
+       error the caller sees carries the server's own code. That code reads
+       "handshake", not "signature" — codeFor() on the Go side matches
+       ErrHandshake before it ever gets a chance to see signing.ErrBadSignature,
+       because handshake() wraps the bad-signature error with "%w: %v" against
+       ErrHandshake, which drops the original error out of the errors.Is()
+       chain entirely (measured in internal/server/server_test.go on the Go
+       side; codeFor()/handshake() are out of scope for 0048 either way). */
+    await assert.rejects(
+      () => client.invoke(forged, "notes.by_topic", { topic: "bound" }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "handshake");
+        return true;
+      },
+    );
   } finally {
     await client.close();
   }
