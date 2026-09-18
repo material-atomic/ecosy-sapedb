@@ -575,3 +575,142 @@ test("storageKey shares the registry across two Commander() calls", async () => 
 test("a bus needs a runner", () => {
   assert.throws(() => Commander({}), TypeError);
 });
+
+/* ==========================================================================
+ * Task 0041: fallback is for the command YOU asked about, not for whatever
+ * a lower layer happened to call. Everything below is new for this task.
+ * ========================================================================== */
+
+/* §1, the central case. "outer" IS declared; its runner reaches for "inner",
+   which is not. The old contract (0028) read this as "outer" missing and
+   answered the fallback — wrong, because "outer" is right there in the
+   registry, and the actual failure is a bug inside its own runner. The
+   counter-case at the end is what keeps the fix from reading as "tryRun
+   throws unconditionally now": the exact same name, asked for directly
+   instead of through outer's runner, is a genuine miss and still falls
+   back — same registry, same name, two different answers, because the two
+   calls are asking two different questions. */
+test("tryRun does not fall back for a miss deep inside a declared command's own runner — through both the bus and a scope", async () => {
+  const { runner } = table({ outer: ({ run }) => run("inner") });
+  const bus = new (Commander({ runner, logger: quiet }))();
+  bus.declare({ name: "outer", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("outer", {}, "FB"),
+    (error) => CommandNotFound.is(error) && error.command === "inner",
+  );
+  await assert.rejects(
+    () => bus.scope("s").tryRun("outer", {}, "FB"),
+    (error) => CommandNotFound.is(error) && error.command === "inner",
+  );
+
+  // Counter-case: "inner" asked for directly IS a genuine miss.
+  assert.equal(await bus.tryRun("inner", {}, "FB"), "FB");
+  assert.equal(await bus.scope("s").tryRun("inner", {}, "FB"), "FB");
+});
+
+/* §2. The knife for the obvious-looking `error.command === name` check: two
+   buses, "orders.list" declared on A, A's runner delegating to B under that
+   SAME name, and B never having declared it. B's miss mints an error whose
+   `.command` is exactly "orders.list" — the name A was asked about — even
+   though A HAS "orders.list". A name comparison cannot tell "A's own lookup
+   missed" apart from "somewhere downstream, a lookup under the same name
+   missed"; only the session stamp can, because B's miss is stamped with B's
+   session, not A's. This is the one shape that separates the two
+   implementations — see also commander-dual-build.test.mjs, which repeats it
+   across an ESM/CJS boundary where the stamp cannot cross even by symbol
+   collision. */
+test("a facade bus delegating to a backend bus under the SAME command name must throw, not fall back to a name comparison", async () => {
+  const busB = new (Commander({ runner: async () => null, logger: quiet }))();
+  // busB never declares "orders.list".
+
+  const busA = new (Commander({ runner: () => busB.run("orders.list"), logger: quiet }))();
+  busA.declare({ name: "orders.list", operation: {} });
+
+  await assert.rejects(
+    () => busA.tryRun("orders.list", {}, "FB"),
+    (error) => CommandNotFound.is(error) && error.command === "orders.list",
+  );
+});
+
+/* §3. Two levels deep, so a check based on stack depth (e.g.
+   `session.stack.length === 1`) cannot pass by coincidence the way it would
+   at exactly one level. Asked about either "outer" or "mid" — both
+   declared, neither the actual miss — the answer must be the same: throw,
+   naming "khong-co" as the command that actually missed. A depth-based
+   implementation gets §1 right (there the miss sits at stack depth 1, same
+   as a stamp condition of `=== 1` would expect) and is caught here:
+   `tryRun("mid")` makes "mid" the root of ITS OWN session, so the miss
+   inside mid's runner again sits at stack depth 1 — the exact depth the
+   mutant treats as "root" — and a depth check cannot tell that apart from
+   an actual root miss, so it wrongly falls back instead of throwing. */
+test("a miss two levels deep throws whether asked about the outer or the middle command, always naming the command that actually missed", async () => {
+  const { runner } = table({
+    outer: ({ run }) => run("mid"),
+    mid: ({ run }) => run("khong-co"),
+  });
+  const bus = new (Commander({ runner, logger: quiet }))();
+  bus.declare({ name: "outer", operation: {} });
+  bus.declare({ name: "mid", operation: {} });
+
+  await assert.rejects(
+    () => bus.tryRun("outer", {}, "FB"),
+    (error) => CommandNotFound.is(error) && error.command === "khong-co",
+  );
+  await assert.rejects(
+    () => bus.tryRun("mid", {}, "FB"),
+    (error) => CommandNotFound.is(error) && error.command === "khong-co",
+  );
+});
+
+/* §4. A throw is not the same as silence: the trace left behind must still
+   name the command that actually missed, at the depth it actually missed
+   at, and the call that started it all. The three-level case is what rules
+   out a hardcoded depth — §1 and this test's first half both have a miss
+   one level down, and a constant would pass both; three distinct depths in
+   one trace cannot come from a constant. The final assertion is the knife
+   for collapsing scope().tryRun and CommanderImpl.tryRun into one
+   `tryExecute` and losing the `finally { state.lastTrace = ... }` in the
+   process: a fallback that is reached correctly but leaves no trace, or two
+   stale lines from a previous call, would slip past every assertion above
+   it and only show up here. */
+test("a deep miss leaves an accurate trace: the missed command, its depth, its caller — and the forward case still leaves exactly one line", async () => {
+  const { runner } = table({ outer: ({ run }) => run("inner") });
+  const bus = new (Commander({ runner, logger: quiet }))();
+  bus.declare({ name: "outer", operation: {} });
+
+  await assert.rejects(() => bus.tryRun("outer", {}, "FB"));
+  let trace = bus.traceLog();
+  assert.equal(trace.length, 2);
+  const inner = trace.find((entry) => entry.command === "inner");
+  assert.equal(inner.ok, false);
+  assert.equal(inner.caller, "outer");
+  assert.equal(inner.depth, 1);
+  assert.equal(inner.error, new CommandNotFound("inner").message);
+  const outerLine = trace.find((entry) => entry.command === "outer");
+  assert.equal(outerLine.ok, false);
+  assert.equal(outerLine.depth, 0);
+
+  const { runner: r3 } = table({ a: ({ run }) => run("b"), b: ({ run }) => run("c") });
+  const bus3 = new (Commander({ runner: r3, logger: quiet }))();
+  bus3.declare({ name: "a", operation: {} });
+  bus3.declare({ name: "b", operation: {} });
+
+  await assert.rejects(() => bus3.tryRun("a", {}, "FB"));
+  trace = bus3.traceLog();
+  assert.equal(trace.length, 3);
+  assert.deepEqual(
+    trace.map((entry) => entry.depth).sort((a, b) => a - b),
+    [0, 1, 2],
+  );
+
+  // Forward case, reusing the same `bus` from above on purpose: each call
+  // to tryExecute starts its own fresh session, so an unrelated earlier
+  // trace on the same bus cannot leak in — a genuine root miss is still
+  // exactly one line at depth 0.
+  assert.equal(await bus.tryRun("khong-co", {}, "FB"), "FB");
+  trace = bus.traceLog();
+  assert.equal(trace.length, 1);
+  assert.equal(trace[0].command, "khong-co");
+  assert.equal(trace[0].depth, 0);
+});

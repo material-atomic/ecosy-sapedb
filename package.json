@@ -12,7 +12,8 @@
   "files": [
     "bin",
     "dist",
-    "fixtures"
+    "fixtures",
+    "CHANGELOG.md"
   ],
   "bin": {
     "rsql-types": "./bin/rsql-types.mjs"

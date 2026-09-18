@@ -127,16 +127,24 @@ export interface CommandScope {
   /** Runs a command with this scope as the caller, so the trace needs no reminding. */
   run<Result = unknown>(name: string, args?: Record<string, unknown>): Promise<Result>;
   /**
-   * The same, answering `fallback` when and only when the command is not
-   * declared; every other failure — the runner throwing, auth refusing, a
-   * cycle — rethrows. The trace line left behind by a miss on this path
-   * carries this scope's owner as `caller`, the same as {@link run} above,
-   * not an argument the caller passed in.
+   * The same, answering `fallback` when and only when `name` **itself** —
+   * the command this call asked for — is not declared. Every other
+   * failure rethrows: the runner throwing, auth refusing, a cycle, and also
+   * a `CommandNotFound` that some other lookup produced further down —
+   * `name` declared and its runner calling a *different*, undeclared
+   * command is a bug inside the command that ran, not "this command is
+   * missing", and it throws rather than being reported as a fallback.
    *
-   * One case this sentence does not yet describe, said here rather than left
-   * to be found: a miss *inside* a declared command's runner also answers
-   * `fallback` today, though the command that was asked for is declared. Task
-   * 0041 narrows it to the lookup this call itself made.
+   * If a runner genuinely wants a miss of its own to answer a fallback
+   * rather than throw, it catches it where it makes the call:
+   * `try { await request.run(other) } catch (e) { if (CommandNotFound.is(e)) … }`.
+   * Reaching back for this method from inside a runner is not that — see
+   * {@link RunRequest.run}, which explains why a runner that calls the bus
+   * directly starts a new root and loses both the cycle check and the trace.
+   *
+   * The trace line left behind by a miss on this path carries this scope's
+   * owner as `caller`, the same as {@link run} above, not an argument the
+   * caller passed in.
    */
   tryRun<Result = unknown>(name: string, args?: Record<string, unknown>, fallback?: Result): Promise<Result | undefined>;
 }
@@ -156,17 +164,25 @@ export interface CommanderToken {
 
   run<Result = unknown>(name: string, args?: Record<string, unknown>, caller?: string): Promise<Result>;
   /**
-   * The same, answering `fallback` when and only when the command is not
-   * declared in the registry. Every other failure — the runner throwing, auth
-   * refusing, a cycle — rethrows; a fallback that also caught those would make
-   * "nobody wired this up yet" and "the caller typo'd an argument" read as the
-   * same answer.
+   * The same, answering `fallback` when and only when `name` **itself** —
+   * the command this call asked for — is not declared in the registry.
+   * Every other failure rethrows: the runner throwing, auth refusing, a
+   * cycle, and also a `CommandNotFound` minted by some *other* lookup —
+   * `name` declared and its runner going on to call a *different*,
+   * undeclared command is a bug inside the command that ran, not "this
+   * command is missing", so it throws instead of being folded into
+   * `fallback`. A fallback that swallowed that shape too would make "nobody
+   * wired this up yet" and "the command I run reaches for a name that does
+   * not exist" read as the same answer.
    *
-   * One case this sentence does not yet describe, said here rather than left
-   * to be found: a miss *inside* a declared command's runner also answers
-   * `fallback` today, though the command that was asked for is declared — the
-   * runner did throw, and this catches it anyway. Task 0041 narrows it to the
-   * lookup this call itself made.
+   * A runner that does want its own nested miss to answer a fallback catches
+   * it at the call it makes:
+   * `try { await request.run(other) } catch (e) { if (CommandNotFound.is(e)) … }`.
+   * Calling this method from inside a runner is not the same thing and is
+   * not the way to get it — see {@link RunRequest.run}: a runner reaching
+   * back for the bus starts a fresh root, so the cycle check no longer sees
+   * the commands already on the stack and the nested trace is discarded
+   * instead of joining the one the caller will read.
    */
   tryRun<Result = unknown>(name: string, args?: Record<string, unknown>, fallback?: Result, caller?: string): Promise<Result | undefined>;
 
@@ -355,6 +371,60 @@ interface Session {
 }
 
 /**
+ * Stamped on a `CommandNotFound` when, and only when, the lookup that
+ * minted it is the ROOT lookup of a call — `session.stack.length === 0`,
+ * meaning no command is already running in this session when `execute`
+ * looks `name` up. `tryExecute` below reads this stamp instead of comparing
+ * `error.command === name`, because a name comparison cannot tell "I looked
+ * this up and missed" apart from "something downstream, reaching for the
+ * exact same name, looked it up and missed" — a facade bus that delegates
+ * to a backend bus under the same command name is the single most common
+ * shape two buses take, and it defeats a name comparison every time.
+ *
+ * `Symbol()`, deliberately UNREGISTERED — the opposite of the three
+ * `Symbol.for` brands a hundred lines up, and opposite on purpose, not an
+ * oversight to "fix" for symmetry. Those brands have to survive two builds
+ * of this module meeting in one process: a `CommandNotFound` thrown by the
+ * CJS build must still answer `true` to the ESM build's `is()`, because
+ * it is the same kind of error either way — that is why they sit in the
+ * runtime's global symbol registry under a shared string. This mark must
+ * NOT survive that boundary the way the brands do: a root miss minted by
+ * the *other* build's own root call is the root of *that* build's own
+ * session, never of this build's.
+ *
+ * Measured, not assumed: swapping this one `Symbol()` for `Symbol.for` —
+ * alone, leaving the `=== session` comparison below untouched — does NOT
+ * turn any test red, including the ESM/CJS same-name bridging test built
+ * specifically to exercise this shape (`commander-dual-build.test.mjs`).
+ * The reason is the comparison, not the key: what actually stops a bridged
+ * miss from being mistaken for this call's own root miss is comparing
+ * against the exact `session` OBJECT, which is created fresh per call and
+ * never exposed outside this module (not on `RunRequest`, not returned by
+ * anything public) — so nothing outside this closure can ever construct a
+ * value that would satisfy `=== session`, whether the key that reaches it
+ * is private or registered. A registered key only lets outside code reach
+ * the property at all, which needs a matching value to do anything with;
+ * an unregistered one removes that reach entirely, for free, at zero
+ * runtime cost — worth keeping for that reason, but it is not the thing
+ * carrying this fix's correctness, and no test here claims otherwise.
+ *
+ * One consequence for the rename in task 0038, said here because this is the
+ * line a search for the package name lands on. The comment above the three
+ * brands counts **two** strings in this package that carry its npm name and
+ * have to move together — those brands, and the registry key in
+ * `internal/global-state.ts`. That count is still right, and this string is
+ * deliberately not in it. Because the symbol is unregistered, the string
+ * inside it is never looked up and never compared against anything; it is a
+ * label that shows up when someone prints the property key in a debugger,
+ * and nothing else reads it. Renaming it alone breaks nothing, and leaving
+ * it behind while the other two move breaks nothing either. It is called out
+ * here so it is not mistaken for a third member of that pair and "made
+ * symmetrical" with them — the symmetry is the bug, as the paragraph above
+ * explains.
+ */
+const ROOT_MISS = Symbol("@ecosy/rsql rootMiss"); // module-private; NOT exported, NOT Symbol.for
+
+/**
  * Builds a command bus class.
  *
  * The registry lives with the class, not its instances, so `new AppCommands()`
@@ -411,6 +481,28 @@ export function Commander(options: CommanderOptions): CommanderClass {
          found-command path below, so a miss nested inside a running command
          lands at that command's depth, not always at zero. */
       const error = new CommandNotFound(name);
+      if (session.stack.length === 0) {
+        /* `=== 0`, not `<= 0`: `session.stack.length` is a `string[]`'s
+           `.length`, which is never negative, so the two conditions are
+           mathematically equivalent over every value this can ever hold —
+           measured by mutating one into the other and finding no test able
+           to tell them apart. `=== 0` is kept because it says what is
+           actually meant ("nothing is running yet"), where `<= 0` reads as
+           a guard against a case (`< 0`) that cannot occur.
+
+           Only a ROOT lookup gets the stamp — the value is `session` itself,
+           not `true`. `true` would only say "some root miss happened
+           somewhere"; a bare boolean can't tell this session's own root miss
+           apart from a root miss stamped by a bridged call through a
+           different bus that happens to share this module (the same-name
+           facade-to-backend shape ROOT_MISS exists to catch). Storing the
+           exact `session` object and comparing with `===` in `tryExecute`
+           is what makes the check "is this THE lookup this call made", not
+           merely "is this A root miss". `Object.defineProperty` with its
+           defaults (non-writable, non-configurable, non-enumerable) is
+           enough — nothing here needs those to be relaxed. */
+        Object.defineProperty(error, ROOT_MISS, { value: session });
+      }
       session.trace.push({
         command: name,
         caller,
@@ -481,6 +573,106 @@ export function Commander(options: CommanderOptions): CommanderClass {
     }
   };
 
+  /**
+   * The one body behind both {@link CommandScope.tryRun} and
+   * {@link CommanderToken.tryRun}. 0028 round 1 kept these as two
+   * independent bodies on purpose, reasoning that a scope's `tryRun` and
+   * the bus's own differ enough (a fixed `caller`, a fixed owner) to be
+   * worth writing twice. Task 0041 adds a condition neither body had
+   * before — the `ROOT_MISS` check — and a second mention of a mistake is
+   * twice the chance to get one of the two copies wrong and not the other.
+   * The cheapest way to not forget the second body is to not have one.
+   *
+   * What that trade moved rather than removed, said plainly so the next
+   * person does not have to find it: before this task both `tryRun` bodies
+   * went through `run` above, so whatever `run` did, `tryRun` did too. They
+   * no longer do — this calls `execute` directly. `run` and `tryExecute` are
+   * now siblings that each open a session and each close it by writing
+   * `state.lastTrace`, and anything added to one of those two jobs has to be
+   * added to both or `tryRun` quietly stops matching `run`.
+   *
+   * This cannot simply call `run` to close that gap, which is the obvious
+   * thing to try: the whole check below is `=== session`, an identity test
+   * against the exact session object this call created, and `run` keeps its
+   * session to itself. Delegating would leave nothing here to compare
+   * against.
+   */
+  const tryExecute = async <Result>(
+    name: string,
+    args: Record<string, unknown>,
+    caller: string | null,
+    fallback: Result | undefined,
+  ): Promise<Result | undefined> => {
+    const session: Session = { stack: [], trace: [] };
+    try {
+      return (await execute(name, args, caller, session)) as Result;
+    } catch (error) {
+      /* Only the ROOT lookup of THIS call is a fallback's business. A
+         CommandNotFound minted deeper in the same session — the runner of
+         a command that IS declared reaching for a name that is not — is a
+         bug inside that command, not "this command is missing", and it
+         rethrows. So does a CommandNotFound stamped by some other bus's own
+         root lookup (a different session, or a different build entirely) —
+         it says nothing about whether `name` is in THIS registry. Checking
+         `error.command === name` instead would pass all of that: a facade
+         bus delegating to a backend bus under the same command name is the
+         ordinary shape of two buses meeting, and that shape mints an error
+         whose `.command` is exactly the name this call asked for even
+         though it came from someone else's lookup entirely.
+
+         `CommandNotFound.is(error) &&` is redundant as a CLASS CHECK: by
+         construction, the ONLY object that can ever satisfy
+         `[ROOT_MISS] === session` is the exact `CommandNotFound` `execute`
+         minted moments earlier for THIS session's root lookup —
+         `ROOT_MISS` is a private symbol never exported, `session` is never
+         exposed on `RunRequest` or anywhere else public, and the only place
+         that ever calls `Object.defineProperty(_, ROOT_MISS, …)` is right
+         there in `execute`'s not-found branch, on the object it just
+         constructed. There is no way, through this module's public
+         surface, for a caller's runner to get its hands on a *different*
+         object stamped with *this* session — by the time a runner runs at
+         all, this session's stack already has at least one entry, so
+         nothing minted while a runner is running can ever be this
+         session's root miss. Measured, not assumed: swapping
+         `CommandNotFound.is(error)` for `error instanceof CommandNotFound`,
+         for `error instanceof Error`, or for
+         `(error as { name?: unknown })?.name === "CommandNotFound"` — each
+         ANDed with the exact same `[ROOT_MISS] === session` — turns no test
+         in this repository red, because whenever the right-hand side is
+         true the left-hand side is true no matter which of the four it is.
+
+         But `is(error) &&` is NOT removable, because a runner is free to
+         `throw null` or `throw undefined` — the same case `hasBrand`
+         (:236–242, a few hundred lines above) exists to guard against —
+         and `error[ROOT_MISS]` on either of those throws a `TypeError`
+         instead of letting the original `null`/`undefined` rethrow.
+         `is(error)` is what stands in front of that property read and
+         returns `false` before it happens; that is the half of this `&&`
+         doing the deciding, not the class check. Measured: dropping only
+         `CommandNotFound.is(error) &&` and keeping
+         `[ROOT_MISS] === session` alone turns
+         "tryRun rethrows null thrown by the runner…" red — a `TypeError:
+         Cannot read properties of null (reading 'Symbol(...)')` where the
+         test expects `null` itself to come back out. It also still
+         documents which error this branch is actually about, and is the
+         one of the four class checks that would start mattering again the
+         day `ROOT_MISS`'s own guarantee is ever loosened — the other three
+         would then silently paper over exactly the mistake `is()` exists
+         to catch everywhere else in this file. */
+      if (CommandNotFound.is(error) && (error as unknown as Record<PropertyKey, unknown>)[ROOT_MISS] === session) {
+        return fallback;
+      }
+      throw error;
+    } finally {
+      /* Load-bearing: this is what leaves a trace behind even when the call
+         ends in a fallback rather than a throw. Easiest thing to drop when
+         collapsing two bodies into one — there is now only one `finally` to
+         remember, but also only one place left where forgetting it would
+         hide. */
+      state.lastTrace = session.trace;
+    }
+  };
+
   return class CommanderImpl implements CommanderToken {
     declare(command: CommandDeclaration): void {
       declare(null, command);
@@ -495,19 +687,7 @@ export function Commander(options: CommanderOptions): CommanderClass {
         declare: (command) => declare(owner, command),
         has: (name) => state.commands.has(name),
         run: (name, args = {}) => run(name, args, owner) as Promise<never>,
-        tryRun: async (name, args = {}, fallback?) => {
-          try {
-            return (await run(name, args, owner)) as never;
-          } catch (error) {
-            /* Only a lookup miss is a fallback's business. Anything else —
-               a runner that threw, a caller that failed auth, a cycle — is a
-               real failure, and swallowing it would make "nobody wired this
-               up yet" and "the caller passed the wrong argument name" read as
-               the same answer to whoever is holding the fallback value. */
-            if (CommandNotFound.is(error)) return fallback as never;
-            throw error;
-          }
-        },
+        tryRun: (name, args = {}, fallback?) => tryExecute(name, args, owner, fallback) as Promise<never>,
       };
     }
 
@@ -539,21 +719,13 @@ export function Commander(options: CommanderOptions): CommanderClass {
       return run(name, args, caller ?? null) as Promise<Result>;
     }
 
-    async tryRun<Result = unknown>(
+    tryRun<Result = unknown>(
       name: string,
       args: Record<string, unknown> = {},
       fallback?: Result,
       caller?: string,
     ): Promise<Result | undefined> {
-      try {
-        return (await run(name, args, caller ?? null)) as Result;
-      } catch (error) {
-        /* Same reasoning as scope().tryRun above, duplicated because these
-           two bodies are independent — fixing one and forgetting the other
-           is exactly the bug this task exists to close. */
-        if (CommandNotFound.is(error)) return fallback;
-        throw error;
-      }
+      return tryExecute(name, args, caller ?? null, fallback);
     }
 
     traceLog(): readonly TraceEntry[] {
