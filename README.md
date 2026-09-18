@@ -54,6 +54,16 @@ not, and each is optional because the store keeps only the fields the document
 actually had. Every other read is `Record<string, unknown>`. That is the
 schema's true answer, not a gap waiting to be filled in.
 
+One more gap, and this one *is* waiting to be filled in: a parameter used as an
+operation's `key` (or a batch step's key) that is neither `required` nor given
+a `default` is written here as optional, so `tsc` waves through a call that
+leaves it out — and the real store refuses that call at run time (`"<name>"
+was not given and has no default`). This generator does not read `key` or
+`document` to catch that case. The fix belongs on the schema side, in task
+0016, which will teach `rsql apply` to reject that declaration up front, the
+same way it already refuses an unanchored `direction`. Until then, a schema
+shaped that way is already a schema the store should not have accepted.
+
 ## The signing contract
 
 ```

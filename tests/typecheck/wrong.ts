@@ -40,8 +40,12 @@ export async function aBoolIsNotAString(): Promise<void> {
 
 export async function aProjectedGetHasRows(): Promise<void> {
   /* A get sends rows back and the projection says which fields they carry.
-     Were a get written down as sending none, `row` would be `never`, every
-     field on it would be readable, and this line would compile. */
+     Were a get written down as sending none, `row` would be `never` — which
+     is assignable to everything, but reading a property off it is still a
+     compile error (`TS2339`), not a free pass to read anything. This line
+     stays red either way, for the same reason it is red now, so it does not
+     exercise that mutation; the get-rowless case is bitten by a named
+     assertion in `tests/types.test.mjs`, not by this file. */
   const detail = await items.invoke(url, "items.detail", { id: "it-1" });
   detail.rows?.[0]?.amount; // EXPECT-ERROR a field the projection does not name, on a read that does return rows
 }

@@ -151,9 +151,13 @@ test("a get declares the rows it sends back, and a projected get names their fie
   const detail = entryOf(typesFor(coverageSchema, { name: "Coverage" }), "items.detail");
 
   /* `never` is how this generator says "no rows come back", and it is not a
-     harmless thing to say of a read: `never` is assignable to everything and
-     every property may be read off it, so a get written down that way turns
-     the row type off rather than getting it wrong loudly. */
+     harmless thing to say of a read — though not for the reason it first
+     looked. `never` is assignable to everything, yes, but reading a property
+     off it is a compile error (`TS2339`); it lets nothing through silently.
+     Said of a get that does return rows, `never` would instead make every
+     real field access on those rows fail to compile — wrong in the opposite
+     direction, too strict rather than too loose. This assertion is what
+     stops that: the golden `row: never;` string is forbidden for a get. */
   assert.doesNotMatch(detail, /row: never;/, "a get returns rows, and `never` says it returns none");
   assert.match(detail, /row: \{\n\s+kind\?: unknown;\n\s+"nested\.deep"\?: unknown;\n\s+\};/);
 });

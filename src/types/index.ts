@@ -172,6 +172,17 @@ function argsOf(operation: SchemaOperation, indent: string): string {
        no default: an argument with a default may be left out, and one with
        neither may also be left out and simply arrives unset. */
     const optional = parameter.required ? "" : "?";
+    /* `required` is the only thing read here, and that is a known gap, not a
+       permanent one. A parameter used as an operation's `key` (or a batch
+       step's key) that is neither `required` nor given a `default` still
+       gets written `?:` by this same rule — `tsc` waves the call through,
+       and the real store refuses it at run time ("was not given and has no
+       default"). This generator does not read `key`/`document` to special-
+       case that; the fix belongs in the schema, task 0016, which will teach
+       `rsql apply` to reject such a declaration up front, the way it already
+       refuses an unanchored `direction`. Until that lands, a schema shaped
+       that way is one the store should not have accepted in the first
+       place — this is that known hole, written down rather than left quiet. */
     return `${indent}  ${property(parameter.name)}${optional}: ${type};`;
   });
 
