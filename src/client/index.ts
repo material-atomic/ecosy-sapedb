@@ -9,6 +9,12 @@
  * const rows = await store.invoke(process.env.DATABASE_URL!, "orders.list", { limit: 20 });
  * ```
  *
+ * That call names an operation as a string and passes whatever it likes, and
+ * nothing notices a typo until the store answers. `rsql-types` turns a
+ * `schema.json` into a `.d.ts`, and {@link Client}`<Schema>` takes it, so the
+ * same typo is a compile error instead. Same runtime, same frames — see
+ * `@ecosy/rsql/types`.
+ *
  * Three things it is built around, each of them a decision rather than a
  * default:
  *
@@ -165,6 +171,95 @@ export interface ClientToken {
 
 export type ClientClass = new () => ClientToken;
 
+/**
+ * What the store answers a call with, whole.
+ *
+ * This is the envelope every action comes back in, not the rows themselves:
+ * `rows` is absent for a `get` that found nothing and for everything that
+ * returns a number or a key rather than documents, which is why reading it
+ * makes the caller say what happens when there was nothing.
+ */
+export interface InvokeResult<Row = unknown> {
+  operation: string;
+  version: number;
+  /** Absent rather than empty when the read found nothing. */
+  rows?: Row[];
+  count?: number;
+  /** The primary key a write landed on. Its type is the collection's, which the caller knows and the wire does not. */
+  key?: unknown;
+  changed?: number;
+  /** The read stopped at its declared limit and there was more. */
+  truncated?: boolean;
+  /** The log entry a repeated write id had already produced. Nothing was written again. */
+  repeated?: number;
+}
+
+/**
+ * One operation as `rsql-types` writes it down: what it takes, and what one of
+ * its rows is.
+ *
+ * `row` is honest about how little a schema says. A schema declares
+ * collections, indexes and operations — it never declares the shape of a
+ * document, because this store deliberately does not impose one. So the only
+ * read whose rows have a knowable shape is one with a `projection`, where the
+ * declaration names the fields that come back. Everything else is a document
+ * the schema has no opinion about, and its row type is
+ * `Record<string, unknown>`.
+ */
+export interface OperationType {
+  args: Record<string, unknown>;
+  row: unknown;
+}
+
+/**
+ * A generated schema: operation name → its type.
+ *
+ * Written against the schema's own keys rather than as
+ * `Record<string, OperationType>`, because the generated file declares an
+ * `interface` and an interface has no index signature — a record constraint
+ * would refuse the very files this exists to accept, and the error it gives
+ * ("index signature for type 'string' is missing") says nothing at all about
+ * what is actually wrong.
+ */
+export type SchemaTypes<Schema> = { [Name in keyof Schema]: OperationType };
+
+/**
+ * The argument names that must be passed, which is what decides whether the
+ * argument object may be left out altogether.
+ */
+type RequiredArgs<Args> = {
+  [Key in keyof Args]-?: object extends Pick<Args, Key> ? never : Key;
+}[keyof Args];
+
+/* A rest tuple rather than two overloads: it is the only way to make the
+   argument object required for one operation and optional for another while
+   the operation is still being inferred from the name beside it. */
+type InvokeArgs<Args> = [RequiredArgs<Args>] extends [never]
+  ? [args?: Args, options?: InvokeOptions]
+  : [args: Args, options?: InvokeOptions];
+
+/**
+ * A client whose calls are checked against a schema.
+ *
+ * Everything but `invoke` is the untyped client's: a subscription carries
+ * changes from collections the caller never named, so nothing about a schema
+ * narrows it.
+ */
+export interface TypedClientToken<Schema extends SchemaTypes<Schema>> extends Omit<ClientToken, "invoke"> {
+  /**
+   * Calls a declared operation. The name must be one the schema declares and
+   * the arguments must be what it declares them to be — both decided here,
+   * rather than by the store a network round trip later.
+   */
+  invoke<Name extends keyof Schema & string>(
+    target: string | ConnectionTarget,
+    command: Name,
+    ...rest: InvokeArgs<Schema[Name]["args"]>
+  ): Promise<InvokeResult<Schema[Name]["row"]>>;
+}
+
+export type TypedClientClass<Schema extends SchemaTypes<Schema>> = new () => TypedClientToken<Schema>;
+
 interface Pending {
   resolve(value: unknown): void;
   reject(error: unknown): void;
@@ -211,6 +306,22 @@ function unref(timer: unknown): void {
  * Builds a client class. The pool lives with the class, so every `new` shares
  * it; two `Client()` calls are two pools.
  */
+export function Client(options: ClientOptions): ClientClass;
+/**
+ * The same client, with its calls checked against a generated schema:
+ *
+ * ```ts
+ * import type { Schema } from "./rsql-schema";
+ *
+ * const store = new (Client<Schema>({ transport, mode: "bound" }))();
+ * await store.invoke(url, "orders.pay", { order, amount, at, reference });
+ * ```
+ *
+ * A schema argument changes nothing at runtime — the same class, the same
+ * pool, the same frames. It only moves a wrong name or a missing argument from
+ * a failure the store sends back to an error the compiler gives.
+ */
+export function Client<Schema extends SchemaTypes<Schema>>(options: ClientOptions): TypedClientClass<Schema>;
 export function Client(options: ClientOptions): ClientClass {
   if (typeof options?.transport?.connect !== "function") {
     throw new TypeError("[ecosy/rsql] Client needs a transport");

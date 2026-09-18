@@ -17,6 +17,42 @@ are separate, the way `@ecosy/orm` keeps them.
 | `@ecosy/rsql/signer` | The signing contract, and the fixture both languages test against |
 | `@ecosy/rsql/commander` | Named execution: commands declared as data, run by name |
 | `@ecosy/rsql/shape` | Discovery: what a project publishes, by `kind` |
+| `@ecosy/rsql/types` | Turns a `schema.json` into a `.d.ts`, so a wrong call does not compile |
+
+## Calls checked before they are made
+
+A schema already says which operations exist, what each one takes, and which of
+those arguments are required. `rsql-types` writes that down as TypeScript:
+
+```sh
+npx rsql-types schema.json > src/rsql-schema.d.ts
+```
+
+```ts
+import { Client } from "@ecosy/rsql/client";
+import type { Schema } from "./rsql-schema";
+
+const store = new (Client<Schema>({ transport, mode: "bound" }))();
+
+await store.invoke(url, "orders.pay", { order: "ord-1", amount: 249.5, at, reference: "x" });
+await store.invoke(url, "orders.pya", { order: "ord-1", amount: 249.5, at, reference: "x" });
+//                      ^ Argument of type '"orders.pya"' is not assignable to parameter of
+//                        type '"orders.place" | "orders.pay" | "orders.get" | ...'
+```
+
+A wrong name, a missing required argument, an argument of the wrong type and an
+argument the operation does not take are each a compile error rather than a
+refusal from the store a round trip later. `Client(…)` without a schema is
+unchanged and still takes any name and any arguments.
+
+**What the types cannot tell you.** A schema declares collections, indexes and
+operations. It does not declare the shape of a document — this store
+deliberately does not impose one — so there is nothing to derive a row type
+from. The one exception is a read with a `projection`, which names the fields
+that come back: there the field *names* are known and their types still are
+not, and each is optional because the store keeps only the fields the document
+actually had. Every other read is `Record<string, unknown>`. That is the
+schema's true answer, not a gap waiting to be filled in.
 
 ## The signing contract
 

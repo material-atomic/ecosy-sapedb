@@ -10,9 +10,13 @@
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "files": [
+    "bin",
     "dist",
     "fixtures"
   ],
+  "bin": {
+    "rsql-types": "./bin/rsql-types.mjs"
+  },
   "exports": {
     ".": {
       "source": "./src/index.ts",
@@ -69,6 +73,12 @@
       "import": "./dist/shape/index.mjs",
       "require": "./dist/shape/index.js"
     },
+    "./types": {
+      "source": "./src/types/index.ts",
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/types/index.mjs",
+      "require": "./dist/types/index.js"
+    },
     "./fixtures/signing.json": "./fixtures/signing.json"
   },
   "scripts": {
@@ -77,6 +87,7 @@
     "test": "yarn build && yarn test:run",
     "test:run": "node --test \"tests/*.test.mjs\"",
     "lint": "eslint src/",
+    "types:fixtures": "node bin/rsql-types.mjs fixtures/ledger.schema.json > tests/typecheck/ledger.d.ts && node bin/rsql-types.mjs tests/typecheck/books.schema.json --name Books > tests/typecheck/books.d.ts",
     "prepublishOnly": "yarn clean && yarn build && yarn test:run"
   },
   "repository": {

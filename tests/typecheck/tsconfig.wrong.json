@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": ["ledger.d.ts", "books.d.ts", "wrong.ts"]
+}

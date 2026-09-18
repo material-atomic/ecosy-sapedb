@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": [],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "pretty": false,
+    "paths": {
+      "@ecosy/rsql/client": ["../../dist/client/index.d.ts"]
+    }
+  }
+}

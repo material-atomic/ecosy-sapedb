@@ -1,0 +1,39 @@
+{
+  "collections": [
+    {
+      "name": "books",
+      "key": { "path": "id", "type": "string", "auto": "ulid" },
+      "indexes": [
+        {
+          "name": "by_shelf",
+          "fields": [
+            { "path": "shelf", "type": "string", "missing": "skip" },
+            { "path": "added", "type": "number", "missing": "skip" }
+          ]
+        }
+      ]
+    }
+  ],
+
+  "operations": [
+    {
+      "name": "books.on_shelf",
+      "collection": "books",
+      "action": "scan",
+      "index": "by_shelf",
+      "limit": 100,
+      "projection": ["title", "shelf", "author.name"],
+      "input": [
+        { "name": "shelf", "type": "string", "required": true },
+        { "name": "since", "type": "number", "default": 0 }
+      ],
+      "from": { "terms": [{ "arg": "shelf" }, { "arg": "since" }] },
+      "to": { "terms": [{ "arg": "shelf" }] }
+    },
+    {
+      "name": "books.how_many",
+      "collection": "books",
+      "action": "count"
+    }
+  ]
+}
