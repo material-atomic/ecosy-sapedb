@@ -13,10 +13,10 @@ export function globalState<State>(namespace: string, storageKey: string | undef
   if (storageKey === undefined) return create();
 
   if (typeof storageKey !== "string" || storageKey.length === 0) {
-    throw new TypeError(`[ecosy/rsql:${namespace}] storageKey must be a non-empty string`);
+    throw new TypeError(`[ecosy/sapedb:${namespace}] storageKey must be a non-empty string`);
   }
 
-  const key = Symbol.for(`@ecosy/rsql/${namespace}:${storageKey}`);
+  const key = Symbol.for(`@ecosy/sapedb/${namespace}:${storageKey}`);
   const holder = globalThis as unknown as Record<symbol, State | undefined>;
 
   if (!holder[key]) {

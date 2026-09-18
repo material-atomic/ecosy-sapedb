@@ -16,7 +16,7 @@
     "outDir": "dist",
     "rootDir": "src",
     "paths": {
-      "@ecosy/rsql/*": ["./src/*"]
+      "@ecosy/sapedb/*": ["./src/*"]
     }
   },
   "include": ["src"],

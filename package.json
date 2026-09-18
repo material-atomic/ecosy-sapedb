@@ -1,7 +1,7 @@
 {
-  "name": "@ecosy/rsql",
+  "name": "@ecosy/sapedb",
   "version": "0.0.0",
-  "description": "RSQL: a storage service addressed by a connection string — driver, signer, command bus and shape registry",
+  "description": "A storage service addressed by a connection string — driver, signer, command bus and shape registry",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -16,7 +16,7 @@
     "CHANGELOG.md"
   ],
   "bin": {
-    "rsql-types": "./bin/rsql-types.mjs"
+    "sapedb-types": "./bin/sapedb-types.mjs"
   },
   "exports": {
     ".": {
@@ -88,16 +88,16 @@
     "test": "yarn build && yarn test:run",
     "test:run": "node --test \"tests/*.test.mjs\"",
     "lint": "eslint src/",
-    "types:fixtures": "node bin/rsql-types.mjs fixtures/ledger.schema.json > tests/typecheck/ledger.d.ts && node bin/rsql-types.mjs tests/typecheck/books.schema.json --name Books > tests/typecheck/books.d.ts && node bin/rsql-types.mjs tests/typecheck/coverage.schema.json --name Coverage > tests/typecheck/coverage.d.ts",
+    "types:fixtures": "node bin/sapedb-types.mjs fixtures/ledger.schema.json > tests/typecheck/ledger.d.ts && node bin/sapedb-types.mjs tests/typecheck/books.schema.json --name Books > tests/typecheck/books.d.ts && node bin/sapedb-types.mjs tests/typecheck/coverage.schema.json --name Coverage > tests/typecheck/coverage.d.ts",
     "prepublishOnly": "yarn clean && yarn build && yarn test:run"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/material-atomic/ecosy-rsql.git"
+    "url": "git+https://github.com/material-atomic/ecosy-sapedb.git"
   },
   "keywords": [
     "ecosy",
-    "rsql",
+    "sapedb",
     "storage",
     "sqlite",
     "command-bus",

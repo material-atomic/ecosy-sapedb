@@ -18,7 +18,7 @@ const booksSchema = JSON.parse(read("./typecheck/books.schema.json"));
    to handle was being generated and read by nobody. This third one is written
    for the claim rather than for an application — every argument type, every
    action, and every way a schema has of saying an argument is optional — and
-   `rsql apply` accepts it, so it is not a shape invented to make a test pass. */
+   `sapedb apply` accepts it, so it is not a shape invented to make a test pass. */
 const coverageSchema = JSON.parse(read("./typecheck/coverage.schema.json"));
 
 /**
@@ -59,21 +59,25 @@ function expectedErrorLines(path) {
     .flatMap((line, at) => (line.includes("EXPECT-ERROR") && !line.trimStart().startsWith("*") ? [at + 1] : []));
 }
 
-test("the ledger fixture is the schema the Go repo ships, not a paraphrase of it", () => {
+test("the ledger fixture is the schema the Go repo ships, not a paraphrase of it", (t) => {
   /* The copy is what this package tests against, because the Go repo is a
      sibling checkout and not everyone who runs these tests has it. When it is
      there, a drift between the two is the thing worth catching: a schema
      format that moved on would otherwise be found by a user. */
-  const beside = new URL("../../rsql/examples/ledger/schema.json", import.meta.url);
+  const beside = new URL("../../sapedb/examples/ledger/schema.json", import.meta.url);
   if (!existsSync(beside)) {
-    console.log("    (the Go repo is not beside this one; comparing nothing)");
+    // t.skip, not console.log + return: a silent return here is a
+    // regression test that stopped checking anything and would not say so.
+    // Until the sibling submodule directory itself is renamed to match (the
+    // coordinator's job, not this package's), this is expected to skip.
+    t.skip("the Go repo is not beside this one (packages/sapedb), or its directory has not been renamed yet; comparing nothing");
     return;
   }
 
   assert.deepEqual(
     ledgerSchema,
     JSON.parse(readFileSync(beside, "utf8")),
-    "fixtures/ledger.schema.json has drifted from ../rsql/examples/ledger/schema.json",
+    "fixtures/ledger.schema.json has drifted from ../sapedb/examples/ledger/schema.json",
   );
 });
 
@@ -166,7 +170,7 @@ test("a totals row is the rollup's shape, not the projection's, even where a pro
   const operation = coverageSchema.operations.find((each) => each.name === "items.per_kind");
   assert.ok(operation.projection?.length > 0, "the case only exists while this totals declares a projection");
 
-  /* Measured, not preferred: QA ran this against a real `rsqld` and a totals
+  /* Measured, not preferred: QA ran this against a real `sapedbd` and a totals
      that declares `projection: ["kind"]` came back as `{amount, count,
      group}`. The store builds a rollup row from the rollup's declaration and
      never applies the projection to it, so a projection-shaped row here would

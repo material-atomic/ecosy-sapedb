@@ -266,7 +266,7 @@ test("tryRun rethrows a TypeError raised by the bus itself, through both the bus
    (or `error?.name`) instead of `instanceof CommandNotFound` passes every test
    above and still gets this one wrong. */
 test("tryRun does not mistake an Error merely named CommandNotFound for an actual lookup miss, through both the bus and a scope", async () => {
-  const impostor = new Error("[ecosy/rsql] command not declared: x");
+  const impostor = new Error("[ecosy/sapedb] command not declared: x");
   impostor.name = "CommandNotFound";
   const bus = new (Commander({
     runner: () => {
@@ -333,7 +333,7 @@ test("tryRun rethrows null thrown by the runner, through both the bus and a scop
    (a lookalike that does NOT carry the brand is rejected). Mixing the two
    into one test would leave neither claim readable. */
 test("CommandNotFound.is() answers true for a bare object that carries the exact brand key — the contract a brand exists to make, not a shortcut through tryRun", () => {
-  const branded = { [Symbol.for("@ecosy/rsql.CommandNotFound")]: true };
+  const branded = { [Symbol.for("@ecosy/sapedb.CommandNotFound")]: true };
   assert.equal(CommandNotFound.is(branded), true);
 });
 
@@ -348,7 +348,7 @@ test("CommandNotFound.is() answers false for null, undefined, and primitives wit
    sets it to `false` would wrongly pass. The brand is a claim of `true`,
    not merely a key's presence. */
 test("CommandNotFound.is() answers false for an object whose brand key is present but explicitly false", () => {
-  const impostor = { [Symbol.for("@ecosy/rsql.CommandNotFound")]: false };
+  const impostor = { [Symbol.for("@ecosy/sapedb.CommandNotFound")]: false };
   assert.equal(CommandNotFound.is(impostor), false);
 });
 

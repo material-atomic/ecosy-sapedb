@@ -2,7 +2,7 @@
  * The connection string.
  *
  * ```
- * rsql://<account_id>:<password>@<host>:<port>/<dbname>?sig=<hex>
+ * sapedb://<account_id>:<password>@<host>:<port>/<dbname>?sig=<hex>
  *        └ the account         └ where            └ the database
  * ```
  *
@@ -11,7 +11,7 @@
  * string is the credential — nothing in it is individually safe to publish.
  *
  * ```ts
- * import { parseConnectionString, verifyConnectionString } from "@ecosy/rsql/connection";
+ * import { parseConnectionString, verifyConnectionString } from "@ecosy/sapedb/connection";
  *
  * const target = parseConnectionString(process.env.DATABASE_URL!);
  * if (!(await verifyConnectionString(target, { secret }))) throw new Error("rotated");
@@ -21,7 +21,7 @@
 import { InvalidConnectionString } from "../errors";
 import { isValidPassword, verify, type SignOptions } from "../signer";
 
-export const SCHEME = "rsql:";
+export const SCHEME = "sapedb:";
 export const DEFAULT_PORT = 7433;
 
 /** A connection string, taken apart. */
@@ -123,7 +123,7 @@ export function formatConnectionString(target: ConnectionTarget): string {
   if (!/^[0-9a-f]{64}$/.test(sig)) throw new InvalidConnectionString("sig must be 64 lower-case hex characters", "sig");
 
   const authority = `${encodeURIComponent(accountId)}:${encodeURIComponent(password)}@${host}:${port}`;
-  return `rsql://${authority}/${encodeURIComponent(dbname)}?sig=${sig}`;
+  return `sapedb://${authority}/${encodeURIComponent(dbname)}?sig=${sig}`;
 }
 
 /**
@@ -143,5 +143,5 @@ export async function verifyConnectionString(target: ConnectionTarget | string, 
 /** What a log or an error message may show: everything but the password and the signature. */
 export function redact(target: ConnectionTarget | string): string {
   const parsed = typeof target === "string" ? parseConnectionString(target) : target;
-  return `rsql://${parsed.accountId}:***@${parsed.host}:${parsed.port}/${parsed.dbname}`;
+  return `sapedb://${parsed.accountId}:***@${parsed.host}:${parsed.port}/${parsed.dbname}`;
 }

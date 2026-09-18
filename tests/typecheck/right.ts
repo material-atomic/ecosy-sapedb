@@ -6,7 +6,7 @@
  * calls, one of them correctly.
  */
 
-import { Client, type InvokeResult, type Transport } from "@ecosy/rsql/client";
+import { Client, type InvokeResult, type Transport } from "@ecosy/sapedb/client";
 
 import type { Books } from "./books";
 import type { Coverage, CoverageOperation } from "./coverage";

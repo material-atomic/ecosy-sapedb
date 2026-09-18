@@ -37,12 +37,12 @@ export function assertSerializable(value: unknown, label: string, path: string[]
   if (value === null || typeof value === "boolean" || typeof value === "string") return;
 
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError(`[ecosy/rsql] ${at} is ${value}, which JSON cannot carry`);
+    if (!Number.isFinite(value)) throw new TypeError(`[ecosy/sapedb] ${at} is ${value}, which JSON cannot carry`);
     return;
   }
 
   if (Array.isArray(value) || (typeof value === "object" && value !== null && isPlainObject(value))) {
-    if (seen.has(value as object)) throw new TypeError(`[ecosy/rsql] ${at} is part of a cycle; a declaration must be a tree`);
+    if (seen.has(value as object)) throw new TypeError(`[ecosy/sapedb] ${at} is part of a cycle; a declaration must be a tree`);
     seen.add(value as object);
 
     if (Array.isArray(value)) {
@@ -57,7 +57,7 @@ export function assertSerializable(value: unknown, label: string, path: string[]
     return;
   }
 
-  throw new TypeError(`[ecosy/rsql] ${at} is ${describe(value)}; a declaration must be data — it is stored and sent as JSON`);
+  throw new TypeError(`[ecosy/sapedb] ${at} is ${describe(value)}; a declaration must be data — it is stored and sent as JSON`);
 }
 
 function isPlainObject(value: object): boolean {

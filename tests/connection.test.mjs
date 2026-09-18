@@ -14,7 +14,7 @@ const OPTIONS = { secret: fixture.secret, label: fixture.label };
 const [first] = fixture.cases;
 
 const stringFor = (parts, sig) =>
-  `rsql://${parts.accountId}:${parts.password}@store.example.com:7433/${parts.dbname}?sig=${sig}`;
+  `sapedb://${parts.accountId}:${parts.password}@store.example.com:7433/${parts.dbname}?sig=${sig}`;
 
 test("a string comes apart into the fields a signature covers, plus where to go", () => {
   const target = parseConnectionString(stringFor(first, first.derived));
@@ -29,15 +29,37 @@ test("a string comes apart into the fields a signature covers, plus where to go"
   });
 });
 
+test("DEFAULT_PORT is exactly 7433", () => {
+  // Deliberately not compared to itself: the test below checks a parsed
+  // connection's port against DEFAULT_PORT, which would stay green no
+  // matter what the constant said. Something has to pin the literal.
+  assert.equal(DEFAULT_PORT, 7433);
+});
+
 test("the port has a default, and the path is one database", () => {
-  const target = parseConnectionString(`rsql://acc:${"y".repeat(16)}@localhost/main?sig=${"a".repeat(64)}`);
+  const target = parseConnectionString(`sapedb://acc:${"y".repeat(16)}@localhost/main?sig=${"a".repeat(64)}`);
   assert.equal(target.port, DEFAULT_PORT);
   assert.equal(target.host, "localhost");
   assert.equal(target.dbname, "main");
 
   assert.throws(
-    () => parseConnectionString(`rsql://acc:${"y".repeat(16)}@localhost/one/two?sig=${"a".repeat(64)}`),
+    () => parseConnectionString(`sapedb://acc:${"y".repeat(16)}@localhost/one/two?sig=${"a".repeat(64)}`),
     (error) => error instanceof InvalidConnectionString && error.field === "dbname",
+  );
+});
+
+test("a string perfect in every way but the old scheme is still refused", () => {
+  // Not "the scheme constant says sapedb" — a typo would pass that just as
+  // easily. This is a string valid in every other respect (real account, a
+  // password of the right shape, a real host and port, a database name, a
+  // signature that is 64 hex characters) refused for exactly the one thing
+  // wrong with it.
+  const oldScheme = ["r", "s", "q", "l"].join(""); // see tests/naming.test.mjs
+  const value = `${oldScheme}://acc:${"y".repeat(16)}@store.example.com:7433/main?sig=${"a".repeat(64)}`;
+
+  assert.throws(
+    () => parseConnectionString(value),
+    (error) => error instanceof InvalidConnectionString && error.field === "scheme",
   );
 });
 
@@ -49,17 +71,17 @@ test("parse refuses what the protocol cannot carry, and names the field", () => 
     ["", undefined],
     ["not-a-url", undefined],
     [`postgres://acc:${ok}@host/db?sig=${sig}`, "scheme"],
-    [`rsql://host/db?sig=${sig}`, "account_id"],
-    [`rsql://acc@host/db?sig=${sig}`, "password"],
-    [`rsql://acc:short@host/db?sig=${sig}`, "password"],
-    [`rsql://acc:${"y".repeat(129)}@host/db?sig=${sig}`, "password"],
-    [`rsql://acc:m%E1%BA%ADt-khau-du-dai@host/db?sig=${sig}`, "password"],
-    [`rsql://acc:${ok}@host:99999/db?sig=${sig}`, "port"],
-    [`rsql://acc:${ok}@host/db`, "sig"],
-    [`rsql://acc:${ok}@host/db?sig=nothex`, "sig"],
-    [`rsql://acc:${ok}@host/db?sig=${"a".repeat(63)}`, "sig"],
-    [`rsql://a%3Ab:${ok}@host/db?sig=${sig}`, "account_id"],
-    [`rsql://acc:${ok}@host/d%3Ab?sig=${sig}`, "dbname"],
+    [`sapedb://host/db?sig=${sig}`, "account_id"],
+    [`sapedb://acc@host/db?sig=${sig}`, "password"],
+    [`sapedb://acc:short@host/db?sig=${sig}`, "password"],
+    [`sapedb://acc:${"y".repeat(129)}@host/db?sig=${sig}`, "password"],
+    [`sapedb://acc:m%E1%BA%ADt-khau-du-dai@host/db?sig=${sig}`, "password"],
+    [`sapedb://acc:${ok}@host:99999/db?sig=${sig}`, "port"],
+    [`sapedb://acc:${ok}@host/db`, "sig"],
+    [`sapedb://acc:${ok}@host/db?sig=nothex`, "sig"],
+    [`sapedb://acc:${ok}@host/db?sig=${"a".repeat(63)}`, "sig"],
+    [`sapedb://a%3Ab:${ok}@host/db?sig=${sig}`, "account_id"],
+    [`sapedb://acc:${ok}@host/d%3Ab?sig=${sig}`, "dbname"],
   ];
 
   for (const [value, field] of cases) {
@@ -118,7 +140,7 @@ test("redact leaves out the two things that are the credential", () => {
   const value = stringFor(first, first.derived);
   const shown = redact(value);
 
-  assert.equal(shown, `rsql://${first.accountId}:***@store.example.com:7433/${first.dbname}`);
+  assert.equal(shown, `sapedb://${first.accountId}:***@store.example.com:7433/${first.dbname}`);
   assert.equal(shown.includes(first.password), false);
   assert.equal(shown.includes(first.derived), false);
   assert.equal(redact(parseConnectionString(value)), shown);

@@ -10,7 +10,7 @@
  *
  * It needs the Go binaries, so it skips without them:
  *
- *   RSQL_SERVER_BIN=/path/to/rsqld RSQL_CLI_BIN=/path/to/rsql node --test tests/server.test.mjs
+ *   SAPEDB_SERVER_BIN=/path/to/sapedbd SAPEDB_CLI_BIN=/path/to/sapedb node --test tests/server.test.mjs
  */
 
 import { test, before, after } from "node:test";
@@ -25,12 +25,12 @@ import { Client } from "../dist/client/index.mjs";
 import { nodeTransport } from "../dist/node/index.mjs";
 import { sign } from "../dist/signer/index.mjs";
 
-const SERVER = process.env.RSQL_SERVER_BIN;
-const CLI = process.env.RSQL_CLI_BIN;
+const SERVER = process.env.SAPEDB_SERVER_BIN;
+const CLI = process.env.SAPEDB_CLI_BIN;
 const SECRET = "a-secret-for-this-test-only";
 const PASSWORD = "a-password-of-the-right-shape";
 
-const skip = SERVER && CLI ? false : "set RSQL_SERVER_BIN and RSQL_CLI_BIN to run this";
+const skip = SERVER && CLI ? false : "set SAPEDB_SERVER_BIN and SAPEDB_CLI_BIN to run this";
 
 const schema = {
   collections: [
@@ -82,8 +82,8 @@ async function freePort() {
 before(async () => {
   if (skip) return;
 
-  const dir = mkdtempSync(join(tmpdir(), "rsql-contract-"));
-  const env = { ...process.env, RSQL_SECRET: SECRET, RSQL_DIR: dir, RSQL_ACCOUNT: "acme", RSQL_DB: "main" };
+  const dir = mkdtempSync(join(tmpdir(), "sapedb-contract-"));
+  const env = { ...process.env, SAPEDB_SECRET: SECRET, SAPEDB_DIR: dir, SAPEDB_ACCOUNT: "acme", SAPEDB_DB: "main" };
 
   /* Declared before the server starts: it holds the directory for its whole
      life, so the tool and the server never write the same file at once. */
@@ -92,7 +92,7 @@ before(async () => {
 
   const port = await freePort();
   server = spawn(SERVER, [], {
-    env: { ...env, RSQL_INSECURE: "1", RSQL_ADDR: `127.0.0.1:${port}` },
+    env: { ...env, SAPEDB_INSECURE: "1", SAPEDB_ADDR: `127.0.0.1:${port}` },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -108,7 +108,7 @@ before(async () => {
   });
 
   const sig = await sign({ accountId: "acme", password: PASSWORD, dbname: "main" }, { secret: SECRET });
-  url = `rsql://acme:${PASSWORD}@127.0.0.1:${port}/main?sig=${sig}`;
+  url = `sapedb://acme:${PASSWORD}@127.0.0.1:${port}/main?sig=${sig}`;
 });
 
 after(() => {

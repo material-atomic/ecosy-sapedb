@@ -2,7 +2,7 @@
  * The command bus: named execution.
  *
  * ```ts
- * import { Commander } from "@ecosy/rsql/commander";
+ * import { Commander } from "@ecosy/sapedb/commander";
  *
  * const AppCommands = Commander({ runner });
  * const bus = new AppCommands();
@@ -229,7 +229,7 @@ export type CommanderClass = new () => CommanderToken;
  * Which matters for the rename in task 0038, because this package holds
  * **two** strings that carry its npm name and both answer the same question —
  * which copies of this package count as the same package. These three brands
- * are one; `Symbol.for("@ecosy/rsql/<namespace>:<storageKey>")` in
+ * are one; `Symbol.for("@ecosy/sapedb/<namespace>:<storageKey>")` in
  * `internal/global-state.ts`, the key two builds share a registry under, is
  * the other. They move together or not at all. Move only the brands and two
  * builds go on sharing one registry while disagreeing about what a
@@ -245,9 +245,9 @@ export type CommanderClass = new () => CommanderToken;
  * third and `is()` answers `false` for every instance the class ever mints,
  * with nothing red to say so.
  */
-const NOT_FOUND_BRAND = Symbol.for("@ecosy/rsql.CommandNotFound");
-const UNAUTHORIZED_BRAND = Symbol.for("@ecosy/rsql.CommandUnauthorized");
-const CYCLE_BRAND = Symbol.for("@ecosy/rsql.CommandCycle");
+const NOT_FOUND_BRAND = Symbol.for("@ecosy/sapedb.CommandNotFound");
+const UNAUTHORIZED_BRAND = Symbol.for("@ecosy/sapedb.CommandUnauthorized");
+const CYCLE_BRAND = Symbol.for("@ecosy/sapedb.CommandCycle");
 
 /**
  * `error[brand] === true`, not `brand in error` — an object that carries the
@@ -281,7 +281,7 @@ function hasBrand(error: unknown, brand: symbol): boolean {
  */
 export class CommandNotFound extends Error {
   constructor(readonly command: string) {
-    super(`[ecosy/rsql] command not declared: ${command}`);
+    super(`[ecosy/sapedb] command not declared: ${command}`);
     this.name = "CommandNotFound";
   }
 
@@ -324,7 +324,7 @@ export class CommandUnauthorized extends Error {
     readonly need: AuthNeed,
   ) {
     super(
-      `[ecosy/rsql] ${command} requires ${need.permissions.length ? need.permissions.join(", ") : "a signed-in caller"}`,
+      `[ecosy/sapedb] ${command} requires ${need.permissions.length ? need.permissions.join(", ") : "a signed-in caller"}`,
     );
     this.name = "CommandUnauthorized";
   }
@@ -338,7 +338,7 @@ Object.defineProperty(CommandUnauthorized.prototype, UNAUTHORIZED_BRAND, { value
 /** See {@link CommandNotFound} for why this is a brand-checked `is()` rather than `instanceof`. */
 export class CommandCycle extends Error {
   constructor(readonly chain: readonly string[]) {
-    super(`[ecosy/rsql] command cycle: ${chain.join(" → ")}`);
+    super(`[ecosy/sapedb] command cycle: ${chain.join(" → ")}`);
     this.name = "CommandCycle";
   }
 
@@ -422,7 +422,7 @@ interface Session {
  * symmetrical" with them — the symmetry is the bug, as the paragraph above
  * explains.
  */
-const ROOT_MISS = Symbol("@ecosy/rsql rootMiss"); // module-private; NOT exported, NOT Symbol.for
+const ROOT_MISS = Symbol("@ecosy/sapedb rootMiss"); // module-private; NOT exported, NOT Symbol.for
 
 /**
  * Builds a command bus class.
@@ -432,7 +432,7 @@ const ROOT_MISS = Symbol("@ecosy/rsql rootMiss"); // module-private; NOT exporte
  */
 export function Commander(options: CommanderOptions): CommanderClass {
   if (typeof options?.runner !== "function") {
-    throw new TypeError("[ecosy/rsql] Commander needs a runner");
+    throw new TypeError("[ecosy/sapedb] Commander needs a runner");
   }
 
   const logger = options.logger ?? console;
@@ -444,10 +444,10 @@ export function Commander(options: CommanderOptions): CommanderClass {
 
   const declare = (owner: string | null, declaration: CommandDeclaration) => {
     if (typeof declaration?.name !== "string" || declaration.name.length === 0) {
-      throw new TypeError("[ecosy/rsql] a command needs a name");
+      throw new TypeError("[ecosy/sapedb] a command needs a name");
     }
     if (declaration.operation === undefined) {
-      throw new TypeError(`[ecosy/rsql] ${declaration.name} needs an operation`);
+      throw new TypeError(`[ecosy/sapedb] ${declaration.name} needs an operation`);
     }
 
     assertSerializable(declaration.operation, `${declaration.name}.operation`);
@@ -455,7 +455,7 @@ export function Commander(options: CommanderOptions): CommanderClass {
 
     const previous = state.commands.get(declaration.name);
     if (previous && previous.owner !== null && owner !== null && previous.owner !== owner) {
-      logger.warn(`[ecosy/rsql] "${owner}" replaced command "${declaration.name}" declared by "${previous.owner}"`);
+      logger.warn(`[ecosy/sapedb] "${owner}" replaced command "${declaration.name}" declared by "${previous.owner}"`);
     }
 
     /* A re-declaration replaces the whole descriptor. Keeping the old auth or
@@ -680,7 +680,7 @@ export function Commander(options: CommanderOptions): CommanderClass {
 
     scope(owner: string): CommandScope {
       if (typeof owner !== "string" || owner.length === 0) {
-        throw new TypeError("[ecosy/rsql] a scope needs an owner name");
+        throw new TypeError("[ecosy/sapedb] a scope needs an owner name");
       }
 
       return {

@@ -7,7 +7,7 @@
  * line the marker is on, whichever part of the call it decides to blame.
  */
 
-import { Client, type Transport } from "@ecosy/rsql/client";
+import { Client, type Transport } from "@ecosy/sapedb/client";
 
 import type { Books } from "./books";
 import type { Coverage, CoverageOperation } from "./coverage";

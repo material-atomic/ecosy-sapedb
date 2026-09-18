@@ -9,7 +9,7 @@
  * that kind.
  *
  * ```ts
- * import { ShapeRegistry } from "@ecosy/rsql/shape";
+ * import { ShapeRegistry } from "@ecosy/sapedb/shape";
  *
  * const Shapes = ShapeRegistry({ kinds: ["collection", "metric"] });
  * const shapes = new Shapes();
@@ -92,10 +92,10 @@ export function ShapeRegistry(options: ShapeRegistryOptions = {}): ShapeRegistry
   const state = globalState("shape", options.storageKey, () => new Map<string, Map<string, Shape>>());
 
   const declare = (owner: string | null, kind: string, key: string, shape: ShapeDeclaration) => {
-    if (typeof kind !== "string" || kind.length === 0) throw new TypeError("[ecosy/rsql] a shape needs a kind");
-    if (typeof key !== "string" || key.length === 0) throw new TypeError("[ecosy/rsql] a shape needs a key");
+    if (typeof kind !== "string" || kind.length === 0) throw new TypeError("[ecosy/sapedb] a shape needs a kind");
+    if (typeof key !== "string" || key.length === 0) throw new TypeError("[ecosy/sapedb] a shape needs a key");
     if (allowed && !allowed.has(kind)) {
-      throw new TypeError(`[ecosy/rsql] unknown shape kind "${kind}"; this registry takes ${[...allowed].join(", ")}`);
+      throw new TypeError(`[ecosy/sapedb] unknown shape kind "${kind}"; this registry takes ${[...allowed].join(", ")}`);
     }
 
     assertSerializable(shape ?? {}, `shape ${kind}/${key}`);
@@ -107,7 +107,7 @@ export function ShapeRegistry(options: ShapeRegistryOptions = {}): ShapeRegistry
        wins, as with commands — but never silently: a panel drawing the wrong
        publisher's labels is otherwise a puzzle with no trace. */
     if (previous && previous.owner !== null && owner !== null && previous.owner !== owner) {
-      logger.warn(`[ecosy/rsql] "${owner}" replaced shape ${kind}/${key} declared by "${previous.owner}"`);
+      logger.warn(`[ecosy/sapedb] "${owner}" replaced shape ${kind}/${key} declared by "${previous.owner}"`);
     }
 
     byKey.set(key, freezeDeep({ ...shape, kind, key, owner }) as Shape);
@@ -121,7 +121,7 @@ export function ShapeRegistry(options: ShapeRegistryOptions = {}): ShapeRegistry
 
     scope(owner: string): ShapeScope {
       if (typeof owner !== "string" || owner.length === 0) {
-        throw new TypeError("[ecosy/rsql] a scope needs an owner name");
+        throw new TypeError("[ecosy/sapedb] a scope needs an owner name");
       }
 
       return {

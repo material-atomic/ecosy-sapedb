@@ -2,7 +2,7 @@
  * The driver: connections, and the calls that travel over them.
  *
  * ```ts
- * import { Client } from "@ecosy/rsql/client";
+ * import { Client } from "@ecosy/sapedb/client";
  *
  * const AppStore = Client({ transport, storageKey: "app" });
  * const store = new AppStore();
@@ -10,10 +10,10 @@
  * ```
  *
  * That call names an operation as a string and passes whatever it likes, and
- * nothing notices a typo until the store answers. `rsql-types` turns a
+ * nothing notices a typo until the store answers. `sapedb-types` turns a
  * `schema.json` into a `.d.ts`, and {@link Client}`<Schema>` takes it, so the
  * same typo is a compile error instead. Same runtime, same frames — see
- * `@ecosy/rsql/types`.
+ * `@ecosy/sapedb/types`.
  *
  * Three things it is built around, each of them a decision rather than a
  * default:
@@ -29,7 +29,7 @@
  */
 
 import { parseConnectionString, redact, type ConnectionTarget } from "../connection";
-import { Refused, RsqlError, Unavailable } from "../errors";
+import { Refused, SapedbError, Unavailable } from "../errors";
 import { ulid } from "../internal/id";
 import { globalState } from "../internal/global-state";
 import {
@@ -195,7 +195,7 @@ export interface InvokeResult<Row = unknown> {
 }
 
 /**
- * One operation as `rsql-types` writes it down: what it takes, and what one of
+ * One operation as `sapedb-types` writes it down: what it takes, and what one of
  * its rows is.
  *
  * `row` is honest about how little a schema says. A schema declares
@@ -311,7 +311,7 @@ export function Client(options: ClientOptions): ClientClass;
  * The same client, with its calls checked against a generated schema:
  *
  * ```ts
- * import type { Schema } from "./rsql-schema";
+ * import type { Schema } from "./sapedb-schema";
  *
  * const store = new (Client<Schema>({ transport, mode: "bound" }))();
  * await store.invoke(url, "orders.pay", { order, amount, at, reference });
@@ -324,7 +324,7 @@ export function Client(options: ClientOptions): ClientClass;
 export function Client<Schema extends SchemaTypes<Schema>>(options: ClientOptions): TypedClientClass<Schema>;
 export function Client(options: ClientOptions): ClientClass {
   if (typeof options?.transport?.connect !== "function") {
-    throw new TypeError("[ecosy/rsql] Client needs a transport");
+    throw new TypeError("[ecosy/sapedb] Client needs a transport");
   }
 
   const mode = options.mode ?? "account";
@@ -406,7 +406,7 @@ export function Client(options: ClientOptions): ClientClass {
         try {
           feed.onChange(decodeJsonPayload(frame));
         } catch (error) {
-          logger.warn("[ecosy/rsql] a subscription handler threw", error);
+          logger.warn("[ecosy/sapedb] a subscription handler threw", error);
         }
       }
       return;
@@ -513,11 +513,11 @@ export function Client(options: ClientOptions): ClientClass {
       });
 
       if (failures === maxFailures) {
-        logger.warn(`[ecosy/rsql] ${redact(entry.target)} failed ${failures} times; calls fail fast for ${cooldown}ms`);
+        logger.warn(`[ecosy/sapedb] ${redact(entry.target)} failed ${failures} times; calls fail fast for ${cooldown}ms`);
       }
 
       teardown(entry, error);
-      throw error instanceof RsqlError ? error : new Unavailable(`cannot reach ${redact(entry.target)}`, { cause: error });
+      throw error instanceof SapedbError ? error : new Unavailable(`cannot reach ${redact(entry.target)}`, { cause: error });
     }
   };
 
@@ -600,7 +600,7 @@ export function Client(options: ClientOptions): ClientClass {
       invokeOptions: InvokeOptions = {},
     ): Promise<Result> {
       if (typeof command !== "string" || command.length === 0) {
-        throw new TypeError("[ecosy/rsql] invoke needs a command name");
+        throw new TypeError("[ecosy/sapedb] invoke needs a command name");
       }
 
       const parsed = resolveTarget(target);
@@ -631,7 +631,7 @@ export function Client(options: ClientOptions): ClientClass {
       onChange: (change: Change) => void,
     ): Promise<Subscription> {
       if (typeof onChange !== "function") {
-        throw new TypeError("[ecosy/rsql] subscribe needs somewhere to put the changes");
+        throw new TypeError("[ecosy/sapedb] subscribe needs somewhere to put the changes");
       }
 
       const parsed = resolveTarget(target);

@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "pretty": false,
     "paths": {
-      "@ecosy/rsql/client": ["../../dist/client/index.d.ts"]
+      "@ecosy/sapedb/client": ["../../dist/client/index.d.ts"]
     }
   }
 }

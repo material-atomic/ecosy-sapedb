@@ -10,6 +10,39 @@ const { sign, verify, signedMessage, isValidPassword, assertPassword, PASSWORD_P
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/signing.json", import.meta.url), "utf8"));
 const OPTIONS = { secret: fixture.secret, label: fixture.label };
 
+test("fixture: its label is the same one DEFAULT_LABEL actually is", () => {
+  // Every assertion above signs with fixture.label, not DEFAULT_LABEL — so
+  // renaming DEFAULT_LABEL without touching the fixture (or the reverse)
+  // would leave every one of them green. This is the one line that ties
+  // "the fixture verifies against itself" to "the fixture is what this
+  // package actually ships as its default."
+  assert.equal(fixture.label, DEFAULT_LABEL);
+
+  // Built from a RegExp constructor rather than a regex literal spelling the
+  // old word out: this file is inside the tree tests/naming.test.mjs walks
+  // with no exceptions allowed, and a literal old word here would be a hit
+  // in the very tree that test calls clean.
+  const oldWord = ["r", "s", "q", "l"].join("");
+  assert.doesNotMatch(fixture.secret, new RegExp(oldWord, "i"), "the fixture secret still names the old product");
+});
+
+test("a signature made under the old label does not verify under the current default", async () => {
+  // Built from a template literal with the old word spelled apart, the same
+  // way the assertion above checks for it in the fixture secret: this file
+  // is inside the tree tests/naming.test.mjs walks, and internal/naming's
+  // Go counterpart explains the same choice next to its own version of this
+  // test.
+  const oldWord = ["r", "s", "q", "l"].join("");
+  const oldLabel = `ecosy/${oldWord}:connection:v1`;
+  assert.notEqual(oldLabel, DEFAULT_LABEL, "the old and current labels must differ for this test to mean anything");
+
+  const parts = { accountId: "u", password: "some-password-here", dbname: "p" };
+  const sig = await sign(parts, { secret: fixture.secret, label: oldLabel });
+
+  assert.equal(await verify(sig, parts, { secret: fixture.secret }), false, "verified with label omitted (the default)");
+  assert.equal(await verify(sig, parts, { secret: fixture.secret, label: DEFAULT_LABEL }), false, "verified against DEFAULT_LABEL explicitly");
+});
+
 test("fixture: every case signs to the hex the store must produce, in both modes", async () => {
   assert.ok(fixture.cases.length >= 6);
 

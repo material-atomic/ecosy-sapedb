@@ -2,14 +2,14 @@
 /**
  * Writes a schema down as TypeScript, on stdout.
  *
- *     npx rsql-types schema.json > src/rsql-schema.d.ts
- *     npx rsql-types schema.json --name LedgerSchema
+ *     npx sapedb-types schema.json > src/sapedb-schema.d.ts
+ *     npx sapedb-types schema.json --name LedgerSchema
  *
  * Hand-written rather than built, and deliberately: a bin needs a shebang and
  * a stable path, and the build here preserves modules rather than making
  * bundles, so a generated entry point would be one more thing that can be
  * wrong in a published package for no gain. Everything it does beyond reading
- * a file lives in `@ecosy/rsql/types`, where it can be tested without a
+ * a file lives in `@ecosy/sapedb/types`, where it can be tested without a
  * process.
  */
 
@@ -18,10 +18,10 @@ import { resolve } from "node:path";
 
 import { typesFor } from "../dist/types/index.mjs";
 
-const USAGE = "usage: rsql-types <schema.json> [--name Schema]";
+const USAGE = "usage: sapedb-types <schema.json> [--name Schema]";
 
 function fail(message) {
-  process.stderr.write(`rsql-types: ${message}\n`);
+  process.stderr.write(`sapedb-types: ${message}\n`);
   process.exit(1);
 }
 

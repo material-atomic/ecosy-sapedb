@@ -3,9 +3,9 @@
  * to agree on byte for byte, where disagreement is silent.
  *
  * ```ts
- * import { sign, verify } from "@ecosy/rsql/signer";
+ * import { sign, verify } from "@ecosy/sapedb/signer";
  *
- * const sig = await sign({ accountId, password, dbname }, { secret: process.env.RSQL_SECRET! });
+ * const sig = await sign({ accountId, password, dbname }, { secret: process.env.SAPEDB_SECRET! });
  * ```
  *
  * Web Crypto only, so this runs on Node, on the edge and in Workers alike.
@@ -13,7 +13,7 @@
 
 const encoder = new TextEncoder();
 
-/** What a signature covers: the three fields of an `rsql://` string that identify a connection. */
+/** What a signature covers: the three fields of an `sapedb://` string that identify a connection. */
 export interface ConnectionParts {
   /**
    * The registered account — the product or service this string belongs to.
@@ -30,7 +30,7 @@ export interface ConnectionParts {
 export interface SignOptions {
   /**
    * The shared secret itself. Where it comes from is the app's business —
-   * `RSQL_SECRET` is only a suggested name; nothing here reads the environment.
+   * `SAPEDB_SECRET` is only a suggested name; nothing here reads the environment.
    */
   secret: string;
   /**
@@ -60,7 +60,7 @@ export interface SignOptions {
  */
 export const PASSWORD_PATTERN = /^[A-Za-z0-9._~-]{16,128}$/;
 
-export const DEFAULT_LABEL = "ecosy/rsql:connection:v1";
+export const DEFAULT_LABEL = "ecosy/sapedb:connection:v1";
 
 /** Whether `password` is one this protocol can carry. */
 export function isValidPassword(password: unknown): password is string {
@@ -74,13 +74,13 @@ export function isValidPassword(password: unknown): password is string {
  */
 export function assertPassword(password: unknown): asserts password is string {
   if (typeof password !== "string") {
-    throw new TypeError("[ecosy/rsql] password must be a string");
+    throw new TypeError("[ecosy/sapedb] password must be a string");
   }
   if (password.length < 16 || password.length > 128) {
-    throw new TypeError(`[ecosy/rsql] password must be 16 to 128 characters, got ${password.length}`);
+    throw new TypeError(`[ecosy/sapedb] password must be 16 to 128 characters, got ${password.length}`);
   }
   if (!PASSWORD_PATTERN.test(password)) {
-    throw new TypeError("[ecosy/rsql] password may only use A-Z a-z 0-9 . _ ~ -");
+    throw new TypeError("[ecosy/sapedb] password may only use A-Z a-z 0-9 . _ ~ -");
   }
 }
 
@@ -90,10 +90,10 @@ export function assertPassword(password: unknown): asserts password is string {
    RunSnip's own, and checked here rather than trusted. */
 function assertField(value: unknown, name: string): asserts value is string {
   if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError(`[ecosy/rsql] ${name} must be a non-empty string`);
+    throw new TypeError(`[ecosy/sapedb] ${name} must be a non-empty string`);
   }
   if (value.includes(":")) {
-    throw new TypeError(`[ecosy/rsql] ${name} must not contain ":"`);
+    throw new TypeError(`[ecosy/sapedb] ${name} must not contain ":"`);
   }
 }
 
@@ -102,7 +102,7 @@ const keys = new Map<string, Promise<CryptoKey>>();
 /** The key a signature is made with: derived under a label, or the secret itself. */
 function signingKey(secret: string, label: string | null): Promise<CryptoKey> {
   if (typeof secret !== "string" || secret.length === 0) {
-    throw new TypeError("[ecosy/rsql] secret must be a non-empty string");
+    throw new TypeError("[ecosy/sapedb] secret must be a non-empty string");
   }
 
   const id = JSON.stringify([label === null ? "direct" : "derived", label, secret]);

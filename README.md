@@ -1,9 +1,9 @@
-# @ecosy/rsql
+# @ecosy/sapedb
 
-RSQL: a storage service addressed by a connection string.
+SAPEDB: a storage service addressed by a connection string.
 
 ```
-rsql://<user_id>:<password>@<host>:<port>/<project_id>?sig=<hex>
+sapedb://<user_id>:<password>@<host>:<port>/<project_id>?sig=<hex>
 ```
 
 Two sides — a TypeScript app and a store — agreeing on one signature and one
@@ -14,23 +14,23 @@ are separate, the way `@ecosy/orm` keeps them.
 
 | Import | What it is |
 | --- | --- |
-| `@ecosy/rsql/signer` | The signing contract, and the fixture both languages test against |
-| `@ecosy/rsql/commander` | Named execution: commands declared as data, run by name |
-| `@ecosy/rsql/shape` | Discovery: what a project publishes, by `kind` |
-| `@ecosy/rsql/types` | Turns a `schema.json` into a `.d.ts`, so a wrong call does not compile |
+| `@ecosy/sapedb/signer` | The signing contract, and the fixture both languages test against |
+| `@ecosy/sapedb/commander` | Named execution: commands declared as data, run by name |
+| `@ecosy/sapedb/shape` | Discovery: what a project publishes, by `kind` |
+| `@ecosy/sapedb/types` | Turns a `schema.json` into a `.d.ts`, so a wrong call does not compile |
 
 ## Calls checked before they are made
 
 A schema already says which operations exist, what each one takes, and which of
-those arguments are required. `rsql-types` writes that down as TypeScript:
+those arguments are required. `sapedb-types` writes that down as TypeScript:
 
 ```sh
-npx rsql-types schema.json > src/rsql-schema.d.ts
+npx sapedb-types schema.json > src/sapedb-schema.d.ts
 ```
 
 ```ts
-import { Client } from "@ecosy/rsql/client";
-import type { Schema } from "./rsql-schema";
+import { Client } from "@ecosy/sapedb/client";
+import type { Schema } from "./sapedb-schema";
 
 const store = new (Client<Schema>({ transport, mode: "bound" }))();
 
@@ -60,14 +60,14 @@ a `default` is written here as optional, so `tsc` waves through a call that
 leaves it out — and the real store refuses that call at run time (`"<name>"
 was not given and has no default`). This generator does not read `key` or
 `document` to catch that case. The fix belongs on the schema side, in task
-0016, which will teach `rsql apply` to reject that declaration up front, the
+0016, which will teach `sapedb apply` to reject that declaration up front, the
 same way it already refuses an unanchored `direction`. Until then, a schema
 shaped that way is already a schema the store should not have accepted.
 
 ## The signing contract
 
 ```
-key = HMAC-SHA256(RSQL_SECRET, label)
+key = HMAC-SHA256(SAPEDB_SECRET, label)
 sig = hex(HMAC-SHA256(key, user_id ":" password ":" project_id))
 ```
 

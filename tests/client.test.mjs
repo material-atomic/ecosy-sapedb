@@ -11,7 +11,7 @@ const { Unavailable, Refused } = await import(new URL("../dist/errors.mjs", impo
 const quiet = { warn() {} };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const url = (account = "acc", db = "main", host = "store.example.com") =>
-  `rsql://${account}:${"y".repeat(16)}@${host}:7433/${db}?sig=${"a".repeat(64)}`;
+  `sapedb://${account}:${"y".repeat(16)}@${host}:7433/${db}?sig=${"a".repeat(64)}`;
 
 /**
  * A store that answers over an in-memory pair of pipes: what it was asked,
