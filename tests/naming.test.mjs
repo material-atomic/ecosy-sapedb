@@ -26,6 +26,43 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist"]);
  * Reads every file under root and returns every line (case-insensitively)
  * containing OLD_WORD, no matter how deep the file is nested.
  */
+/**
+ * What this patrol does NOT bound, and why the tests in this file cannot
+ * tell the difference.
+ *
+ * walk() has no file-size cap, no file-count cap, and no rule that skips a
+ * file by its name prefix. The self-checks below cannot distinguish a
+ * version of walk() carrying any of those caps from one without one, because
+ * no fixture here plants enough files, or a big enough file, to reach them.
+ *
+ * Three mutants measured against this suite and still alive, left
+ * unaddressed on purpose: round 4 of task 0038 closed most of the "widen the
+ * edge and it survives" class of mutant; these three are where that chase
+ * was deliberately stopped (task 0051 keeps that call, it does not reopen
+ * it):
+ *
+ *   - a file-size cutoff at 100KB on this side, 64KB on the Go sibling
+ *   - a cap that stops the walk after 85 files
+ *   - a rule that skips any file whose name starts with "#"
+ *
+ * Why they survive: this package's real tree today has no file anywhere
+ * near 100KB (the largest is yarn.lock, 53581 bytes) and, at 45 files total,
+ * is nowhere near 85. Measured with the same exclusions as SKIP_DIRS above:
+ *
+ *   find . \( -name .git -o -name node_modules -o -name dist \) -prune \
+ *     -o -type f -print0 | xargs -0 stat -f "%z %N" | sort -rn | head
+ *   find . \( -name .git -o -name node_modules -o -name dist \) -prune \
+ *     -o -type f -print | wc -l
+ *
+ * No file in this tree starts with "#" either. So this is a boundary the
+ * tree happens to sit inside today, not a property this suite has proven —
+ * a fixture bigger than either mark would still close it, but nobody has
+ * written one, on purpose.
+ *
+ * Sign that this has been hit: a file crossing 100KB, or the tree crossing
+ * 85 files, and the patrol's silence narrowing — some file it used to scan
+ * quietly stops being scanned — with nothing telling anyone that happened.
+ */
 function walk(root) {
   const hits = [];
 

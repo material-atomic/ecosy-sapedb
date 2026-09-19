@@ -4,6 +4,21 @@
 
 ### Breaking
 
+- The package is now `@ecosy/sapedb`. Import paths and the bin name moved
+  with it, the connection string's scheme changed to match, and the
+  environment-variable prefix used in this package's own examples and tests
+  moved too — a naming suggestion only, since nothing in `src/signer` reads
+  the process environment itself. Four `Symbol.for` keys moved as well:
+  three brand keys used to recognise `CommandNotFound`, `CommandUnauthorized`,
+  and `CommandCycle` across this package's two builds, plus one key built
+  from a template for internal global state (`<namespace>:<storageKey>`),
+  all now namespaced under the new name.
+
+  To upgrade: rename the dependency in `package.json` and update every
+  import path that named the old package. Any code that matches a
+  `Symbol.for` key by a hand-written string literal — the four above, or
+  any other reached the same way — needs the new key.
+
 - `tryRun` no longer swallows every error a runner can produce. Before this
   change, a bare `catch { return fallback }` turned a runner throwing, auth
   refusing, or a cycle into the same `fallback` as a missing command — a
