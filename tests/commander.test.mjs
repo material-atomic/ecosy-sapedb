@@ -197,7 +197,7 @@ test("tryRun rethrows a plain Error thrown by the runner, through both the bus a
 test("tryRun rethrows a non-Error value thrown by the runner, through both the bus and a scope", async () => {
   const bus = new (Commander({
     runner: () => {
-      throw "một chuỗi";
+      throw "a string";
     },
     logger: quiet,
   }))();
@@ -205,11 +205,11 @@ test("tryRun rethrows a non-Error value thrown by the runner, through both the b
 
   await assert.rejects(
     () => bus.tryRun("x", {}, "fallback"),
-    (error) => error === "một chuỗi",
+    (error) => error === "a string",
   );
   await assert.rejects(
     () => bus.scope("s").tryRun("x", {}, "fallback"),
-    (error) => error === "một chuỗi",
+    (error) => error === "a string",
   );
 });
 

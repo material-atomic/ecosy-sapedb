@@ -436,7 +436,7 @@ test("a refused handshake does not trip the breaker — only open() throwing doe
 });
 
 test("a socket closing with no Failure ever sent still settles with the old, generic Unavailable", async () => {
-  // The counter-case mục 6 asks for: without this, a mutant that remembers
+  // The counter-case section 6 asks for: without this, a mutant that remembers
   // a "refusal" for any id-0 frame — Welcome included — would misread an
   // ordinary handshake this way too.
   //

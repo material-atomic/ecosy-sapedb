@@ -111,12 +111,12 @@ test("password charset: what the protocol can carry", () => {
   assert.ok(isValidPassword("y".repeat(16)));
   assert.ok(isValidPassword("y".repeat(128)));
 
-  for (const bad of ["y".repeat(15), "y".repeat(129), "mật-khẩu-đủ-dài-rồi", "has spaces here!", "colon:in-password", "plus+sign-here-x", 42, null]) {
+  for (const bad of ["y".repeat(15), "y".repeat(129), "zürich-passwörd-2024", "has spaces here!", "colon:in-password", "plus+sign-here-x", 42, null]) {
     assert.equal(isValidPassword(bad), false, String(bad));
     assert.throws(() => assertPassword(bad), TypeError, String(bad));
   }
 
-  assert.equal(PASSWORD_PATTERN.test("mật"), false, "diacritics are out, so NFC and NFD cannot differ");
+  assert.equal(PASSWORD_PATTERN.test("über"), false, "diacritics are out, so NFC and NFD cannot differ");
 });
 
 test("signing refuses fields that would make the message ambiguous", async () => {
