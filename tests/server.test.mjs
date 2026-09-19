@@ -275,6 +275,126 @@ test("a subscription is told when the connection goes", { skip }, async () => {
   await waitFor(() => ended.length > 0, "the feed was not told the connection had gone");
 });
 
+test("explore is refused before elevate, and answers get/scan/count/catalogue after", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    /* The read/probe channel is not open by default — proving something
+       operates the server is a separate step from proving a connection
+       string, and nothing here should let one stand in for the other. */
+    await assert.rejects(
+      () => client.explore(url, { access: { kind: "count", collection: "notes" } }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "not_operator");
+        return true;
+      },
+    );
+
+    const written = await client.invoke(url, "notes.add", { body: "explored", topic: "explore-test" }, { write: true });
+
+    const elevated = await client.elevate(url, SECRET);
+    assert.equal(elevated.operator, true);
+
+    const got = await client.explore(url, { access: { kind: "get", collection: "notes", key: written.key } });
+    assert.equal(got.result.rows[0].body, "explored");
+    /* Explore blanks these on purpose: they name a declared operation and its
+       version, and a draft is neither. */
+    assert.equal(got.result.operation, "");
+    assert.equal(got.result.version, 0);
+    assert.equal(got.draft.name, "notes.get");
+    assert.equal(got.draft.collection, "notes");
+    assert.equal(got.draft.action, "get");
+
+    /* This side sends `values`/`exclusive`, lower-case, for a Bound — the one
+       type in the whole exchange with no `json` tag on the Go side at all
+       (`Values`/`Exclusive`, capitalized). If `encoding/json`'s
+       case-insensitive fallback did not apply here, this scan would come
+       back unbounded or empty instead of the one row it asks for. */
+    const scanned = await client.explore(url, {
+      access: {
+        kind: "scan",
+        collection: "notes",
+        index: "by_topic",
+        from: { values: ["explore-test"] },
+        to: { values: ["explore-test"] },
+        limit: 10,
+      },
+    });
+    assert.equal(scanned.result.count, 1);
+    assert.equal(scanned.result.rows[0].topic, "explore-test");
+
+    const counted = await client.explore(url, {
+      access: {
+        kind: "count",
+        collection: "notes",
+        index: "by_topic",
+        from: { values: ["explore-test"] },
+        to: { values: ["explore-test"] },
+      },
+    });
+    assert.equal(counted.result.count, 1);
+
+    const catalogue = await client.explore(url, { catalogue: true });
+    assert.ok(catalogue.here.collections.some((c) => c.name === "notes"), "the declared collection is missing from the catalogue");
+    assert.ok(catalogue.here.operations.some((o) => o.name === "notes.add"), "a declared operation is missing from the catalogue");
+    assert.ok(catalogue.here.operations.some((o) => o.name === "notes.by_topic"));
+  } finally {
+    await client.close();
+  }
+});
+
+test("catalogue on a database with nothing declared yet answers collections: null, not []", { skip }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapedb-empty-"));
+  const port = await freePort();
+  const secret = "another-secret-for-the-empty-db-test";
+
+  const proc = spawn(SERVER, [], {
+    env: { ...process.env, SAPEDB_SECRET: secret, SAPEDB_DIR: dir, SAPEDB_INSECURE: "1", SAPEDB_ADDR: `127.0.0.1:${port}` },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("the server did not announce itself")), 5000);
+      proc.stdout.on("data", (chunk) => {
+        if (String(chunk).includes("listening")) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      proc.once("error", reject);
+    });
+
+    /* Nothing runs `apply` here — the database is opened, and its catalogue
+       asked for, before a single collection has ever been declared. */
+    const password = "another-password-of-the-right-shape";
+    const sig = await sign({ accountId: "acme", password, dbname: "fresh" }, { secret });
+    const freshUrl = `sapedb://acme:${password}@127.0.0.1:${port}/fresh?sig=${sig}`;
+
+    const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+    const client = new Made();
+    try {
+      await client.elevate(freshUrl, secret);
+      const explored = await client.explore(freshUrl, { catalogue: true });
+
+      /* store.Catalogue.Collections carries no `omitempty`, and the loop that
+         fills it in only ever appends — starting from a `nil` slice, on a
+         database that has never had anything declared, it stays `nil`, and a
+         `nil` slice with no `omitempty` marshals as JSON `null`. A caller
+         that assumed `[]` here and reached straight for `.map` would break
+         on exactly the database that most needs this read to work. */
+      assert.equal(explored.here.collections, null, "a database with nothing declared yet should answer null, not []");
+      assert.deepEqual(explored.here.operations, []);
+    } finally {
+      await client.close();
+    }
+  } finally {
+    proc.kill("SIGTERM");
+  }
+});
+
 /** waitFor polls a condition, so a test that is wrong fails instead of hanging. */
 async function waitFor(condition, message, timeout = 5000) {
   const deadline = Date.now() + timeout;

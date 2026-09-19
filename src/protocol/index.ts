@@ -41,7 +41,11 @@ export const MAX_PAYLOAD = 16 * 1024 * 1024;
  * before anything else is read. `invoke`/`result`/`failure` carry the work.
  * `subscribe`/`event` carry the change log. `ping`/`pong` are the health check
  * the compose file and the doctor both use, so the path they exercise is the
- * one everything else runs on.
+ * one everything else runs on. `elevate` answers the challenge the welcome
+ * carried, proving the sender holds the server's own secret; `explore` then
+ * carries an access an operator typed rather than the name of a declared
+ * operation — refused on a connection that has not proved it, the same as on
+ * the store side.
  */
 export const FrameType = Object.freeze({
   hello: 1,
@@ -54,6 +58,8 @@ export const FrameType = Object.freeze({
   subscribe: 8,
   event: 9,
   goodbye: 10,
+  elevate: 11,
+  explore: 12,
 });
 
 export type FrameTypeName = keyof typeof FrameType;

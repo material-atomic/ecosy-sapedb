@@ -42,7 +42,10 @@ test("frame types have names, and an unknown code has none", () => {
   assert.equal(frameTypeName(200), undefined);
   assert.deepEqual(Object.keys(FrameType), [
     "hello", "welcome", "ping", "pong", "invoke", "result", "failure", "subscribe", "event", "goodbye",
+    "elevate", "explore",
   ]);
+  assert.equal(FrameType.elevate, 11);
+  assert.equal(FrameType.explore, 12);
 });
 
 test("a stream is not a sequence of messages: header split, payload split, several at once", () => {

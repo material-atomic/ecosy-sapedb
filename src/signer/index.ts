@@ -180,3 +180,69 @@ export async function verify(signature: unknown, parts: ConnectionParts, options
   const key = await signingKey(options.secret, options.label === undefined ? DEFAULT_LABEL : options.label);
   return crypto.subtle.verify("HMAC", key, bytes, encoder.encode(message));
 }
+
+/**
+ * Operating a database is a different permission from using one, and nothing
+ * in a connection string says which you hold.
+ *
+ * A connection string signs account, password and database name — what to
+ * reach, not what you may do once there. So an operator proves something
+ * else instead: possession of the server's own secret, over the nonce the
+ * store just chose for this connection (the welcome frame's `challenge`,
+ * lower-case hex, {@link CHALLENGE_BYTES} bytes). One challenge per
+ * connection is what stops a proof copied out of a log or a process listing
+ * from being replayed on another one.
+ *
+ * This is the client side of the store's `signing.Operating` / `Operates` —
+ * both must derive the same key under {@link OPERATOR_LABEL} and sign the
+ * raw nonce bytes, not a JSON envelope around them, for a proof made here to
+ * answer a challenge issued there.
+ */
+export const OPERATOR_LABEL = "sapedb/operator:v1";
+
+/** How long a welcome's `challenge` is, in bytes — 64 hex characters. */
+export const CHALLENGE_BYTES = 32;
+
+/**
+ * The proof that answers a welcome's challenge: lower-case hex, 64 characters.
+ *
+ * @throws TypeError when `secret` is empty or `challenge` is not
+ * {@link CHALLENGE_BYTES} bytes of hex — a nonce this side did not just get
+ * from a welcome frame proves nothing.
+ */
+export async function operate(secret: string, challenge: string): Promise<string> {
+  if (typeof secret !== "string" || secret.length === 0) {
+    throw new TypeError("[ecosy/sapedb] secret must be a non-empty string");
+  }
+  const nonce = fromHex(challenge?.toLowerCase());
+  if (!nonce || nonce.length !== CHALLENGE_BYTES) {
+    throw new TypeError(`[ecosy/sapedb] challenge must be ${CHALLENGE_BYTES} bytes of hex, from a welcome frame`);
+  }
+
+  const key = await signingKey(secret, OPERATOR_LABEL);
+  return toHex(await crypto.subtle.sign("HMAC", key, nonce));
+}
+
+/**
+ * Whether `proof` is the answer to this challenge under this secret.
+ *
+ * Never throws for input reasons, same as {@link verify}. Nothing in this
+ * package calls this — the client only ever makes a proof, never checks
+ * one — but it is kept alongside `operate` for the same reason `verify` is
+ * kept alongside `sign`: a function with no counterpart to check it against
+ * is a function nothing here can prove agrees with the store.
+ */
+export async function provesOperator(proof: unknown, secret: string, challenge: string): Promise<boolean> {
+  if (typeof proof !== "string") return false;
+
+  const bytes = fromHex(proof.toLowerCase());
+  if (!bytes || bytes.length !== 32) return false;
+
+  const nonce = fromHex(challenge?.toLowerCase());
+  if (!nonce || nonce.length !== CHALLENGE_BYTES) return false;
+
+  if (typeof secret !== "string" || secret.length === 0) return false;
+
+  const key = await signingKey(secret, OPERATOR_LABEL);
+  return crypto.subtle.verify("HMAC", key, bytes, nonce);
+}

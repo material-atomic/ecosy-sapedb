@@ -32,6 +32,7 @@ import { parseConnectionString, redact, type ConnectionTarget } from "../connect
 import { Refused, SapedbError, Unavailable } from "../errors";
 import { ulid } from "../internal/id";
 import { globalState } from "../internal/global-state";
+import { operate } from "../signer";
 import {
   decodeJsonPayload,
   encodeJsonFrame,
@@ -164,6 +165,30 @@ export interface ClientToken {
   ): Promise<Subscription>;
   /** Round trip to the store — the same path everything else uses, so a health check proves the real thing. */
   ping(target: string | ConnectionTarget): Promise<number>;
+  /**
+   * Proves this connection holds the server's own secret, over the challenge
+   * the welcome just issued for it. Marks the connection as an operator on
+   * the store side; {@link explore} is refused on one that has not done this.
+   *
+   * Operating a database is a different permission from using one, and
+   * nothing in a connection string says which you hold — this is the proof
+   * instead, good for this one connection only. It does not survive a
+   * reconnect: a connection the pool re-opens after this one drops gets a
+   * fresh challenge and starts as no more an operator than a brand new one,
+   * and calling this again is the only way back.
+   */
+  elevate(target: string | ConnectionTarget, secret: string, options?: { timeout?: number }): Promise<Elevated>;
+  /**
+   * Runs a typed access — a `get`, a `scan` or a `count` an operator names
+   * directly — or asks what the database holds, on a connection that has
+   * called {@link elevate}. Nothing here writes: that is a different frame
+   * this driver does not send, on purpose.
+   */
+  explore<Row = unknown>(
+    target: string | ConnectionTarget,
+    request: ExploreRequest,
+    options?: { timeout?: number },
+  ): Promise<Explored<Row>>;
   /** Closes every connection. Calls in flight are rejected. */
   close(): Promise<void>;
   stats(): PoolStats;
@@ -192,6 +217,283 @@ export interface InvokeResult<Row = unknown> {
   truncated?: boolean;
   /** The log entry a repeated write id had already produced. Nothing was written again. */
   repeated?: number;
+}
+
+/* ---- the operator shell: elevate, and explore's typed accesses ----
+ *
+ * Every field below is checked against the store's own struct tags in
+ * internal/store and internal/server, not guessed from the rest of this
+ * file's naming — a field the store marks `omitempty` is optional here, one
+ * it does not is required here even where it is usually empty, and a wire
+ * key that breaks this file's own naming habits (snake_case, or no tag at
+ * all) is kept exactly as the store spells it. Getting one of these
+ * backwards does not fail a build; it fails silently, in whatever call
+ * happens to hit the field first. See tests/server.test.mjs for the cases
+ * this was checked against a real daemon.
+ */
+
+/** One end of a scan an operator names directly, without a declared operation to hold it.
+ *
+ * Mirrors `store.Bound` on the Go side — the one type in this whole exchange
+ * with no `json` tag on either field at all, so `encoding/json` would marshal
+ * it as `{"Values":...,"Exclusive":...}`, capitalized, if the store ever sent
+ * one back. It never does; `Bound` is only ever read, as the `from`/`to` of
+ * an {@link Access}. That is what makes `values`/`exclusive` here safe rather
+ * than merely convenient: `encoding/json`'s decoder falls back to a
+ * case-insensitive match against the exported field name when no tag claims
+ * it first, so lower-case, matching everything else `explore` carries, still
+ * reaches `Bound.Values` and `Bound.Exclusive` intact. Proven against the
+ * real daemon in tests/server.test.mjs, not assumed — and worth re-checking
+ * the day `store.Bound` gains a `json` tag or the store starts emitting one.
+ */
+export interface Bound {
+  values: unknown[];
+  exclusive?: boolean;
+}
+
+/**
+ * One thing an operator asks to look at — the parameters of a declared
+ * operation, arriving now instead of having been declared. Mirrors
+ * `store.Access`.
+ */
+export interface Access {
+  /** `"get"`, `"scan"` or `"count"`. Nothing writes. */
+  kind: "get" | "scan" | "count";
+  collection: string;
+  /** Which document, for a `get`. */
+  key?: unknown;
+  /** Which index a `scan` or `count` walks. Empty is the clustered one. */
+  index?: string;
+  from?: Bound;
+  to?: Bound;
+  limit?: number;
+  /** Which fields to show. */
+  projection?: string[];
+}
+
+/**
+ * Where a value in a declared operation comes from: an argument of the call,
+ * a constant written into the declaration, or what an earlier batch step
+ * produced. Exactly one of the five. Mirrors `store.Term`.
+ */
+export interface Term {
+  arg?: string;
+  value?: unknown;
+  /** Distinguishes a declared value of `null` from no value at all, which JSON alone cannot. */
+  constant?: boolean;
+  step?: string;
+  field?: string;
+}
+
+/**
+ * One end of a declared scan: values for the first fields of the index, and
+ * whether that point is included. Mirrors `store.Endpoint`.
+ *
+ * `terms` carries no `omitempty` on the Go side, so a `from`/`to` a draft
+ * came back with always has the key, even as `[]` for a stretch with no
+ * bound at that end — never absent, so never worth an `?` here.
+ */
+export interface Endpoint {
+  terms: Term[];
+  exclusive?: boolean;
+}
+
+/** One declared argument of an operation. Mirrors `store.Parameter`. */
+export interface Parameter {
+  name: string;
+  type: string;
+  required?: boolean;
+  default?: unknown;
+}
+
+/** One thing a batch step's document must already satisfy. Mirrors `store.Condition`. */
+export interface Condition {
+  path: string;
+  /** The value the field must have. Absent (on the wire) says it must not be there at all. Exactly one of the two. */
+  equals?: Term;
+  absent?: boolean;
+}
+
+/** One part of a batch, in the order it runs. Mirrors `store.Step`. */
+export interface Step {
+  name?: string;
+  action: string;
+  collection: string;
+  key?: Term;
+  document?: Record<string, Term>;
+  set?: Record<string, Term>;
+  /** Whether the document this step names must, or must not, already be there. Absent (on the wire) means not checked. */
+  exists?: boolean;
+  require?: Condition[];
+}
+
+/**
+ * A declaration: everything about a call except its arguments. What
+ * `explore` hands back as the draft an access would have to be declared as,
+ * and what a database's catalogue lists as already declared. Mirrors
+ * `store.Operation`.
+ */
+export interface Operation {
+  name: string;
+  collection: string;
+  action: string;
+  input?: Parameter[];
+  /** Which document, for the actions that work on exactly one. */
+  key?: Term;
+  /** Which declared total to read, for an operation that reads one. */
+  rollup?: string;
+  index?: string;
+  from?: Endpoint;
+  to?: Endpoint;
+  direction?: Term;
+  /** What an insert or a put writes. */
+  document?: Record<string, Term>;
+  /** What an update changes. */
+  set?: Record<string, Term>;
+  steps?: Step[];
+  /** The fields a read returns. Empty returns the whole document. */
+  projection?: string[];
+  /** The most rows a scan may return. Present on every declared scan. */
+  limit?: number;
+  /** What a caller must hold. Checked fail-closed. */
+  scopes?: string[];
+  version?: number;
+}
+
+/** What a field of a document's index key is. Mirrors `store.Field`. */
+export interface FieldSpec {
+  path: string;
+  type: string;
+  descending?: boolean;
+  /**
+   * What an index does with a document that has no value here: `"skip"`,
+   * `"first"` or `"last"`. Carries no `omitempty` on the Go side — a default
+   * here would silently decide which documents a range query returns, so the
+   * store never lets it go unsaid, and this is never optional either.
+   */
+  missing: "skip" | "first" | "last";
+}
+
+/** One declared index. Mirrors `store.Index`. */
+export interface IndexSpec {
+  name: string;
+  fields: FieldSpec[];
+  unique?: boolean;
+  /** The one field whose array elements are indexed separately, if any. */
+  array?: string;
+  /** Carried in the index entry so a read that wants only these fields never touches the document. */
+  include?: string[];
+  id: number;
+}
+
+/** The primary key: where it lives in the document and what it is. Mirrors `store.Key`. */
+export interface PrimaryKey {
+  path: string;
+  type: string;
+  /** `"ulid"` to have one made when the document does not carry it, or absent to require the writer to supply it. */
+  auto?: string;
+}
+
+/** How a collection is divided into files. Mirrors `store.Partition`. */
+export interface Partition {
+  by: "time" | "hash";
+  /** Time partitions only. */
+  every?: "day" | "month" | "year";
+  /** Time partitions only. Absent (on the wire) keeps everything. */
+  keep?: number;
+  /** Hash partitions only. */
+  into?: number;
+}
+
+/** A total kept up to date by every write, in the same transaction as the write. Mirrors `store.Rollup`. */
+export interface RollupSpec {
+  name: string;
+  group?: FieldSpec[];
+  count?: boolean;
+  sum?: string[];
+  id: number;
+}
+
+/**
+ * A collection as it was declared. Mirrors `store.Spec`.
+ *
+ * `next_index_id`/`next_rollup_id` are the one place this shell's wire
+ * breaks its own naming habit of one short lower-case word per field: the
+ * store's own struct tags spell them with an underscore, unlike every other
+ * field here, and this keeps that spelling rather than "fixing" it into
+ * `nextIndexId` and silently losing the value.
+ */
+export interface CollectionSpec {
+  name: string;
+  key: PrimaryKey;
+  /** Never absent — `null` when the collection was declared with no indexes. */
+  indexes: IndexSpec[] | null;
+  partition?: Partition;
+  rollups?: RollupSpec[];
+  id: number;
+  next_index_id: number;
+  next_rollup_id: number;
+}
+
+/**
+ * What a database holds: the collections and their indexes, and the
+ * operations declared against them. Mirrors `store.Catalogue`.
+ *
+ * `collections` carries no `omitempty` on the Go side, and the loop that
+ * fills it in only ever appends — starting from a `nil` slice, on a database
+ * with no collections declared yet, it is never entered, and a `nil` slice
+ * with no `omitempty` marshals as JSON `null`, not `[]`. Verified against the
+ * real daemon in tests/server.test.mjs: `catalogue: true` before `sapedb
+ * apply` has ever run answers `{"collections":null,"operations":[]}`. A
+ * caller that assumes an array here and reaches straight for `.map` breaks
+ * on exactly the database that most needs the catalogue read to work: the
+ * one nobody has declared anything in yet.
+ */
+export interface Catalogue {
+  collections: CollectionSpec[] | null;
+  operations: Operation[];
+}
+
+/**
+ * What `explore` hands back: the rows (empty envelope when this was a
+ * `catalogue` ask instead), and the declaration the typed access would have
+ * to be. Mirrors `server.explored`.
+ *
+ * `result` and `draft` carry no `omitempty` on the Go side and are always
+ * present — including on a `catalogue` ask, where the store never assigns
+ * either and they arrive as `{"operation":"","version":0}` and
+ * `{"name":"","collection":"","action":""}` rather than being left out. They
+ * are not meaningful there; `here` is what a `catalogue` ask actually
+ * answers, and the field is called `here`, not `catalogue` — the request
+ * flag and the response payload are two different names for the related but
+ * not identical ideas of asking for the catalogue and being handed one.
+ */
+export interface Explored<Row = unknown> {
+  result: InvokeResult<Row>;
+  draft: Operation;
+  /** Present only when the request asked `catalogue: true`. */
+  here?: Catalogue;
+}
+
+/**
+ * What `explore` asks for: a typed access, or the catalogue instead of
+ * reading any of it. Mirrors `server.exploring`.
+ *
+ * Sending both is not refused — the store answers the catalogue and never so
+ * much as looks at `access` — but only one is ever the caller's actual
+ * intent, which is why {@link ClientToken.explore} takes them as one object
+ * rather than two arguments that could disagree.
+ */
+export interface ExploreRequest {
+  /** What to look at. Required unless `catalogue` is `true`. */
+  access?: Access;
+  /** Ask what the database holds instead of reading any of it. */
+  catalogue?: boolean;
+}
+
+/** What answers an `elevate`: whether this connection is now an operator. */
+export interface Elevated {
+  operator: boolean;
 }
 
 /**
@@ -294,6 +596,18 @@ interface Entry {
    * is torn down.
    */
   refusal?: Refused;
+  /**
+   * The welcome's `challenge`, once it arrives — what {@link ClientToken.elevate}
+   * signs. `open()` hands the connection back without waiting for the
+   * welcome, so a caller reaching for the challenge before it lands awaits
+   * this instead of racing the socket. Rejects with whatever {@link refusal}
+   * (or connection error) means it is never coming; resolved and rejected are
+   * both set once, by `handle`/`teardown`, and never touched again — a fresh
+   * `Entry` is what the next connection attempt gets.
+   */
+  challengeReady: Promise<string>;
+  resolveChallenge: (value: string) => void;
+  rejectChallenge: (reason: unknown) => void;
 }
 
 interface Breaker {
@@ -386,7 +700,13 @@ export function Client(options: ClientOptions): ClientClass {
 
     if (state.entries.get(entry.key) === entry) state.entries.delete(entry.key);
 
-    settleAll(entry, error ?? new Unavailable("the connection closed"));
+    const reason = error ?? new Unavailable("the connection closed");
+    settleAll(entry, reason);
+    /* A no-op once the welcome already answered — rejecting a settled promise
+       changes nothing — but the one thing that stops an `elevate()` awaiting
+       a challenge that will now never come from hanging past the connection
+       it was waiting on. */
+    entry.rejectChallenge(reason);
     try {
       connection?.close();
     } catch {
@@ -408,17 +728,21 @@ export function Client(options: ClientOptions): ClientClass {
 
   const handle = (entry: Entry, frame: Frame) => {
     if (frame.id === 0) {
-      /* A Welcome is id 0 too, and carries nothing worth remembering — this
-         branch is only for a Failure, which at id 0 can only mean one thing:
-         the handshake itself was refused. `open()` sends hello and hands the
-         connection back without waiting for either frame, so the call this
-         connection was opened for is already on its way; without this, the
-         reason the store gave would be read here and then thrown away, and
-         `onClose` below would have nothing left to settle that call with but
-         "the store closed the connection". */
+      /* A Welcome is id 0 too. `open()` sends hello and hands the connection
+         back without waiting for either frame, so the call this connection
+         was opened for is already on its way; without reading a Failure here,
+         the reason the store gave would be thrown away, and `onClose` below
+         would have nothing left to settle that call with but "the store
+         closed the connection". A Welcome carries the challenge an operator
+         would have to answer — the one thing here worth remembering, for
+         whichever `elevate()` call is waiting on it. */
       if (frame.type === FrameType.failure) {
         const body = decodeJsonPayload<{ message?: string; code?: string }>(frame);
         entry.refusal = new Refused(body?.message ?? "the store refused the connection", body?.code ?? "refused");
+        entry.rejectChallenge(entry.refusal);
+      } else if (frame.type === FrameType.welcome) {
+        const body = decodeJsonPayload<{ challenge?: string }>(frame);
+        if (body?.challenge) entry.resolveChallenge(body.challenge);
       }
       return; // Nobody asked for this, so nobody is waiting.
     }
@@ -561,6 +885,20 @@ export function Client(options: ClientOptions): ClientClass {
     const existing = state.entries.get(key);
     if (existing) return existing;
 
+    let resolveChallenge!: (value: string) => void;
+    let rejectChallenge!: (reason: unknown) => void;
+    const challengeReady = new Promise<string>((resolve, reject) => {
+      resolveChallenge = resolve;
+      rejectChallenge = reject;
+    });
+    /* A safety net, not the real handler: `elevate()` attaches its own
+       `await`/`.then` when it actually wants the challenge. Without this, a
+       connection whose handshake is refused and whose caller never calls
+       `elevate()` at all would leave this promise rejected with nobody ever
+       having looked at it — an unhandled rejection Node warns about, or
+       crashes on, for a challenge nobody asked for. */
+    challengeReady.catch(() => {});
+
     const entry: Entry = {
       key,
       target,
@@ -570,6 +908,9 @@ export function Client(options: ClientOptions): ClientClass {
       nextId: 0,
       idleTimer: null,
       keepAliveTimer: null,
+      challengeReady,
+      resolveChallenge,
+      rejectChallenge,
     };
     state.entries.set(key, entry);
     return entry;
@@ -712,6 +1053,66 @@ export function Client(options: ClientOptions): ClientClass {
       const startedAt = performance.now();
       await send(resolveTarget(target), FrameType.ping, {}, requestTimeout);
       return performance.now() - startedAt;
+    }
+
+    async elevate(
+      target: string | ConnectionTarget,
+      secret: string,
+      elevateOptions: { timeout?: number } = {},
+    ): Promise<Elevated> {
+      if (typeof secret !== "string" || secret.length === 0) {
+        throw new TypeError("[ecosy/sapedb] elevate needs the server's own secret");
+      }
+
+      const parsed = resolveTarget(target);
+      const entry = entryFor(parsed);
+      const timeout = elevateOptions.timeout ?? requestTimeout;
+      const connection = await open(entry);
+
+      const challenge = await Promise.race([
+        entry.challengeReady,
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(
+            () => reject(new Unavailable(`${redact(parsed)} did not send a challenge within ${timeout}ms`)),
+            timeout,
+          );
+          unref(timer);
+        }),
+      ]);
+      const proof = await operate(secret, challenge);
+
+      return (await sendOn(entry, connection, nextId(entry), FrameType.elevate, { proof }, timeout, parsed)) as Elevated;
+    }
+
+    async explore<Row = unknown>(
+      target: string | ConnectionTarget,
+      request: ExploreRequest,
+      exploreOptions: { timeout?: number } = {},
+    ): Promise<Explored<Row>> {
+      if (!request || (request.access === undefined && !request.catalogue)) {
+        throw new TypeError("[ecosy/sapedb] explore needs an access to type, or catalogue: true");
+      }
+
+      const parsed = resolveTarget(target);
+      const timeout = exploreOptions.timeout ?? requestTimeout;
+
+      const body: Record<string, unknown> = {};
+      if (request.access !== undefined) body.access = request.access;
+      if (request.catalogue) body.catalogue = true;
+      if (mode === "account") {
+        body.dbname = parsed.dbname;
+        body.sig = parsed.sig;
+      }
+
+      try {
+        return (await send(parsed, FrameType.explore, body, timeout)) as Explored<Row>;
+      } catch (error) {
+        // Reading is always safe to retry once, the same as invoke() does for a read.
+        if (error instanceof Unavailable) {
+          return (await send(parsed, FrameType.explore, body, timeout)) as Explored<Row>;
+        }
+        throw error;
+      }
     }
 
     async close(): Promise<void> {

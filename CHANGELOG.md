@@ -78,6 +78,60 @@
 
 ### Added
 
+- `elevate` and `explore`: the operator shell, frame types 11 and 12. Two
+  measurements (an R&D pass over the desktop app and a planner pass over the
+  end-to-end path) found the same thing independently: `FrameType` stopped at
+  `goodbye: 10`, so the whole administrative channel — the one an admin
+  screen and a desktop app both need to read a database without a declared
+  operation for every question — could only be reached from Go. This closes
+  that gap on the reading side only; nothing here writes.
+
+  - `Client#elevate(target, secret, options?)` proves this connection holds
+    the server's own secret, over the challenge its welcome carried, and
+    returns `{ operator: boolean }`. The proof is `@ecosy/sapedb/signer`'s
+    new `operate(secret, challenge)`, the client side of the store's
+    `signing.Operating` — same derived key, under `OPERATOR_LABEL`, over the
+    raw challenge bytes. It does not survive a reconnect: a connection the
+    pool re-opens gets a fresh challenge and starts unelevated, same as a
+    brand new one.
+  - `Client#explore(target, request, options?)` runs a typed `get`, `scan` or
+    `count` an operator names directly, or asks what the database holds
+    (`{ catalogue: true }`), on a connection that has called `elevate`; both
+    are refused with code `not_operator` otherwise. Every wire type this
+    touches — `Access`, `Bound`, `Term`, `Endpoint`, `Operation`,
+    `CollectionSpec`, `Catalogue`, `Explored` — is exported from
+    `@ecosy/sapedb/client`, checked field for field against the store's own
+    `json` tags rather than against this package's usual naming habits. Three
+    places where that check actually mattered, each confirmed against a real
+    daemon in `tests/server.test.mjs` rather than assumed:
+
+    - `store.Bound` (an access's `from`/`to`) carries no `json` tag at all,
+      so the store would marshal one as `{"Values":...,"Exclusive":...}` —
+      capitalized — if it ever sent one back. It never does; a `Bound` is
+      only ever read. Sending it lower-case, `{ values, exclusive }`, matching
+      everything else `explore` carries, still lands correctly, because
+      `encoding/json`'s decoder falls back to a case-insensitive match
+      against the exported field name when nothing more specific claims it.
+    - `store.Catalogue.Collections` carries no `omitempty`, and is only ever
+      appended to — never initialized to `[]` — so a database with nothing
+      declared yet answers `"collections":null`, not `"collections":[]`. The
+      TypeScript type is `CollectionSpec[] | null` for exactly that reason.
+    - A `store.Result` embedded in what `explore` answers always carries
+      `"operation":""` and `"version":0` rather than omitting them — `Explore`
+      blanks both on purpose, because a drafted access is not a declared
+      operation and has neither a name nor a version to report.
+
+  - `fixtures/frames.json` gained `elevate`/`explore` in its `types` map and
+    four cases exercising the new frame bodies. Deliberately setting
+    `types.explore` to a code the fixture did not agree with the store on
+    (verified against an isolated copy of the store's own repo, restoring it
+    after and never touching the checked-in one) turned
+    `TestFixtureFramesDecodeAsTheClientWroteThem` red on the Go side, with
+    the mismatch named in the failure. No test on this side reads the fixture
+    at all today — `tests/protocol.test.mjs` checks `FrameType` against its
+    own hand-written cases, not against `fixtures/frames.json` — which is a
+    pre-existing gap this change did not close.
+
 - `CommandNotFound.is()`, `CommandUnauthorized.is()`, `CommandCycle.is()`.
   This package ships two builds of `src/commander/index.ts` — `import`
   resolves to `dist/commander/index.mjs`, `require` to
