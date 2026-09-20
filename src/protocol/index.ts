@@ -45,7 +45,9 @@ export const MAX_PAYLOAD = 16 * 1024 * 1024;
  * carried, proving the sender holds the server's own secret; `explore` then
  * carries an access an operator typed rather than the name of a declared
  * operation — refused on a connection that has not proved it, the same as on
- * the store side.
+ * the store side. `declare` stores an operation on a server that is already
+ * running, so adding one no longer means stopping it; it takes the same
+ * operator proof, and the same validation an offline `apply` would run.
  */
 export const FrameType = Object.freeze({
   hello: 1,
@@ -60,6 +62,7 @@ export const FrameType = Object.freeze({
   goodbye: 10,
   elevate: 11,
   explore: 12,
+  declare: 13,
 });
 
 export type FrameTypeName = keyof typeof FrameType;
