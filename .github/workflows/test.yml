@@ -36,23 +36,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check out the server this client claims to speak to
-        uses: actions/checkout@v5
-        with:
-          repository: sapedb/sapedb
-          path: .server
+      # Cloned OUTSIDE the workspace on purpose. actions/checkout can only
+      # place a repository inside it, and this repository has a guard that
+      # walks its whole tree for a name it renamed away from. A second
+      # project's source sitting in .server/ trips that guard -- correctly:
+      # the guard is not wrong about what it found, the checkout was wrong
+      # about where to put it.
+      - name: Clone the server this client claims to speak to
+        run: git clone --depth 1 https://github.com/sapedb/sapedb "$RUNNER_TEMP/server"
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: .server/go.mod
-          cache-dependency-path: .server/go.sum
+          go-version-file: ${{ runner.temp }}/server/go.mod
+          cache-dependency-path: ${{ runner.temp }}/server/go.sum
 
       - uses: actions/setup-node@v6
         with:
           node-version: 24
 
       - name: Build the daemon and the command line
-        working-directory: .server
+        working-directory: ${{ runner.temp }}/server
         run: |
           go build -o "$RUNNER_TEMP/sapedbd" ./cmd/sapedbd
           go build -o "$RUNNER_TEMP/sapedb" ./cmd/sapedb
@@ -63,13 +66,20 @@ jobs:
         env:
           SAPEDB_SERVER_BIN: ${{ runner.temp }}/sapedbd
           SAPEDB_CLI_BIN: ${{ runner.temp }}/sapedb
-        run: yarn test | tee "$RUNNER_TEMP/report.txt"
-
-      - name: A skipped test is not a passing test
+        # pipefail, because without it the exit status is tee's and a failing
+        # suite reports success. And the skip count is checked here rather than
+        # in a later step: a run that dies before printing its summary leaves
+        # no count to read, and a missing count must not read as zero.
         run: |
+          set -o pipefail
+          yarn test | tee "$RUNNER_TEMP/report.txt"
           skipped=$(grep -E '^# skipped ' "$RUNNER_TEMP/report.txt" | awk '{print $3}')
-          echo "skipped: ${skipped:-unknown}"
+          if [ -z "$skipped" ]; then
+            echo "::error::the run printed no skip count at all, so nothing here can be trusted."
+            exit 1
+          fi
+          echo "skipped: $skipped"
           if [ "$skipped" != "0" ]; then
-            echo "::error::${skipped} test(s) were skipped in the job whose whole purpose is to run them."
+            echo "::error::$skipped test(s) were skipped in the job whose whole purpose is to run them."
             exit 1
           fi
