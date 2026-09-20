@@ -48,6 +48,10 @@ export const MAX_PAYLOAD = 16 * 1024 * 1024;
  * the store side. `declare` stores an operation on a server that is already
  * running, so adding one no longer means stopping it; it takes the same
  * operator proof, and the same validation an offline `apply` would run.
+ * `establish` does the same for a collection, and it is a frame of its own
+ * rather than a field on `declare`: a frame whose meaning depends on which
+ * field is set has changed role, which is the one thing frame numbers promise
+ * not to do.
  */
 export const FrameType = Object.freeze({
   hello: 1,
@@ -63,6 +67,7 @@ export const FrameType = Object.freeze({
   elevate: 11,
   explore: 12,
   declare: 13,
+  establish: 14,
 });
 
 export type FrameTypeName = keyof typeof FrameType;
