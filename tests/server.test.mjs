@@ -39,6 +39,10 @@ const schema = {
       name: "notes",
       key: { path: "id", type: "string", auto: "ulid" },
       indexes: [{ name: "by_topic", fields: [{ path: "topic", type: "string", missing: "skip" }] }],
+      /* Only for the composed-operation tests below: a rollup, like a
+         collection or an index, cannot be declared over the wire, so it has
+         to be here before the daemon ever starts. */
+      rollups: [{ name: "topic_totals", group: [{ path: "topic", type: "string", missing: "skip" }], count: true }],
     },
   ],
   operations: [
@@ -551,6 +555,173 @@ test("invoking an explicit version reaches an older declaration after a redeclar
       Object.keys(throughV1Again.rows[0]),
       ["topic"],
       "asking for version 1 explicitly should still run the projected declaration, not the redeclared one",
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+/* ---- composed operations (task 0070) ----
+ *
+ * A step of a batch may name an already-declared operation instead of
+ * touching a collection, through three fields `Step` gained on the Go side:
+ * `operation`, `version` and `with`. Until now this client could neither
+ * declare nor read one back — `Step` carried none of the three.
+ *
+ * The positive control below is what the two refusals after it are measured
+ * against: a composed operation declared over the wire, invoked once, and
+ * answering rows from both legs it names. A rejection tested without that
+ * proof standing first could be a driver that never learned to send the
+ * fields at all, dressed up as a validation the store enforces.
+ */
+test("a composed operation is declared over the wire, invoked once, and answers rows from both legs it names", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await client.elevate(url, SECRET);
+
+    const total = await client.declare(url, {
+      name: "notes.total_by_topic",
+      collection: "notes",
+      action: "totals",
+      rollup: "topic_totals",
+      input: [{ name: "topic", type: "string", required: true }],
+      from: { terms: [{ arg: "topic" }] },
+      to: { terms: [{ arg: "topic" }] },
+      limit: 1,
+    });
+    assert.equal(total.version, 1);
+
+    // notes.by_topic was declared through schema.json before the daemon
+    // started and has never been redeclared, so it is still version 1 with a
+    // ceiling of its own declared limit, 10. This parent declares 11 -- 10
+    // plus 1 -- which is exactly the sum, not a margin: see the ceiling test
+    // below for what happens one row short of it.
+    const composed = await client.declare(url, {
+      name: "notes.page_with_total",
+      collection: "notes",
+      action: "batch",
+      limit: 11,
+      input: [{ name: "topic", type: "string", required: true }],
+      steps: [
+        { name: "page", operation: "notes.by_topic", version: 1, with: { topic: { arg: "topic" } } },
+        { name: "total", operation: "notes.total_by_topic", version: total.version, with: { topic: { arg: "topic" } } },
+      ],
+    });
+    assert.equal(composed.version, 1);
+    // The wire did not quietly drop the composed fields on the way back.
+    assert.equal(composed.steps?.length, 2, "the stored declaration lost its steps");
+    assert.equal(composed.steps[0].operation, "notes.by_topic");
+    assert.equal(composed.steps[0].version, 1);
+    assert.equal(composed.steps[1].operation, "notes.total_by_topic");
+    assert.equal(composed.steps[1].version, total.version);
+
+    const topic = "composed-page-test";
+    for (const body of ["one", "two", "three"]) {
+      await client.invoke(url, "notes.add", { body, topic }, { write: true });
+    }
+
+    const result = await client.invoke(url, "notes.page_with_total", { topic });
+    // Result.Rows is flat and unlabeled -- nothing in it says which step a
+    // row came from. 3 notes plus 1 rollup row is known ahead of time only
+    // because this test wrote exactly 3 notes under this topic and nothing
+    // else did.
+    assert.equal(result.rows.length, 4, "3 notes plus 1 rollup row");
+    for (const row of result.rows.slice(0, 3)) {
+      assert.equal(row.topic, topic);
+    }
+    assert.equal(result.rows[3].count, 3, "the rollup leg's count of the 3 notes just written");
+
+    // The same data out of the two flat calls the composed one replaced --
+    // one call instead of two, a count and not a claim about speed.
+    const page = await client.invoke(url, "notes.by_topic", { topic });
+    const rollup = await client.invoke(url, "notes.total_by_topic", { topic });
+    assert.equal(page.rows.length + rollup.rows.length, result.rows.length);
+  } finally {
+    await client.close();
+  }
+});
+
+test("a composed operation whose steps may return more rows than its own declared limit is refused, in the store's own words", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await client.elevate(url, SECRET);
+
+    await assert.rejects(
+      () =>
+        client.declare(url, {
+          name: "notes.page_over_ceiling",
+          collection: "notes",
+          action: "batch",
+          // notes.by_topic's ceiling is 10 and notes.total_by_topic's is 1:
+          // 11 rows between them, the same two legs the positive control
+          // above declared at a limit of 11. This declares one row short.
+          limit: 10,
+          input: [{ name: "topic", type: "string", required: true }],
+          steps: [
+            { name: "page", operation: "notes.by_topic", version: 1, with: { topic: { arg: "topic" } } },
+            { name: "total", operation: "notes.total_by_topic", version: 1, with: { topic: { arg: "topic" } } },
+          ],
+        }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "declaration");
+        // The store's own words -- see internal/store/ops.go's N5 check, the
+        // sum of the steps' ceilings against the parent's own declared limit.
+        assert.equal(
+          error.message,
+          '[ecosy/sapedb] sapedb/store: the declaration does not make sense: the steps of "notes.page_over_ceiling" may return 11 rows between them, and it declares a limit of 10',
+        );
+        return true;
+      },
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test("a step that takes an earlier step's key from a leg that may answer more than one row is refused", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await client.elevate(url, SECRET);
+
+    await assert.rejects(
+      () =>
+        client.declare(url, {
+          name: "notes.take_key_from_a_scan",
+          collection: "notes",
+          action: "batch",
+          limit: 20,
+          input: [{ name: "topic", type: "string", required: true }],
+          steps: [
+            // Ceiling 10 -- notes.by_topic's own declared limit.
+            { name: "page", operation: "notes.by_topic", version: 1, with: { topic: { arg: "topic" } } },
+            // Reaching for "page"'s key is refused before this step is ever
+            // run: a step that may return 10 rows has, at best, the last of
+            // them to give, and taking one is a loop written in JSON -- see
+            // internal/store/ops.go's N4 check.
+            {
+              name: "next",
+              operation: "notes.add",
+              version: 1,
+              with: { body: { step: "page", field: "key" }, topic: { arg: "topic" } },
+            },
+          ],
+        }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "declaration");
+        assert.equal(
+          error.message,
+          '[ecosy/sapedb] sapedb/store: the declaration does not make sense: step "next" passing "body" to "notes.add" names step "page", which may return 10 rows — a step runs once, and taking a value from a step that returns more than one row is asking to run once for each of them',
+        );
+        return true;
+      },
     );
   } finally {
     await client.close();

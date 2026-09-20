@@ -185,3 +185,48 @@
   classes threw a moment earlier in the other build. `is()` recognises an
   instance of either build; code that catches these errors — including a
   consumer's own `catch` — should use `is()`, not `instanceof`.
+
+- `Step` gains `operation`, `version` and `with`: a step of a batch may now
+  name an already-declared operation instead of touching a collection, the
+  same composed operations the store gained on the Go side (`d730d10`,
+  `2d9723c`). This closes the gap the store's own changelog called out by
+  name: "`@ecosy/sapedb` cannot build or read a composed declaration until
+  its own `Step` is widened."
+
+  `Step.action` and `Step.collection` are now optional rather than required,
+  because a step that calls an operation sets neither — code that read
+  `step.action`/`step.collection` unconditionally, assuming every step
+  touches a collection, now gets a type error and needs to check
+  `step.operation` first, the same discriminant the store itself uses.
+
+  Three things measured against the real store rather than assumed, because
+  each is a constraint the wire enforces and not a suggestion:
+
+  - `version` must be greater than zero — there is no "run whichever version
+    is newest". A composed operation's declared cost would otherwise change
+    the moment somebody redeclared the callee, silently.
+  - The readable ceiling of a composed operation, **at any depth**, is its
+    own declared `limit` — never a product of what its steps call. The store
+    refuses a declaration whose steps' ceilings sum to more than that limit,
+    in its own words: `sapedb/store: the declaration does not make sense:
+    the steps of "..." may return N rows between them, and it declares a
+    limit of M`.
+  - A step runs exactly once: a `with` term may take a value from an earlier
+    step's key only when that step's own ceiling is 1. Naming a step whose
+    ceiling is greater than 1 is refused, not truncated to its last row.
+
+  What this does *not* do: `InvokeResult.rows` stays flat, in step order,
+  with no label saying which step a row came from, for a composed operation
+  exactly as it already did for a plain batch. And it is not sold as
+  faster — the store's own measurement found composing saves no fsync a
+  batch was not already saving, and the round trip it saves came to
+  0.099–0.131 ms on loopback, the size of the noise between two runs of the
+  same measurement. What it buys is atomicity and a count of round trips
+  saved, not a duration.
+
+  All three measured end to end against a real daemon in
+  `tests/server.test.mjs`: a composed operation declared over the wire,
+  invoked once, answering rows from both legs it names; the same shape one
+  row over its declared ceiling, refused in the store's exact words; and a
+  step reaching for another step's key across a leg that may answer more
+  than one row, refused before either step ever runs.

@@ -351,17 +351,68 @@ export interface Condition {
   absent?: boolean;
 }
 
-/** One part of a batch, in the order it runs. Mirrors `store.Step`. */
+/**
+ * One part of a batch, in the order it runs. Mirrors `store.Step`.
+ *
+ * A step either touches a collection — `action`/`collection`, with the
+ * fields under them — or calls an already-declared operation — `operation`,
+ * `version` and `with`. Never both; declaring a step that writes both shapes
+ * is refused when the operation is declared, not when it runs.
+ *
+ * What composing an operation buys, and what it does not:
+ *
+ * - **`version` must be greater than zero.** There is no "run whichever
+ *   version is newest": a reference that followed the latest would make the
+ *   cost this operation declares change the moment somebody else redeclared
+ *   the callee, silently. Pinning a version is also what makes recursion
+ *   impossible to write down — a version is only ever handed out going up,
+ *   and a pinned reference only resolves to one that already exists, so the
+ *   reference graph is a DAG by construction.
+ * - **The readable ceiling, at any depth, is the composed operation's own
+ *   declared `limit`** — never a product of what its steps call, and never a
+ *   number the caller has to add up. The store enforces this when the
+ *   operation is declared: the ceilings of the steps must sum to no more
+ *   than the parent's `limit`.
+ * - **A step runs exactly once.** A `with` term may take a value from an
+ *   earlier step's key only when that step's own ceiling is 1 — a step
+ *   cannot take a value from a leg that may hand back more than one row,
+ *   which is what keeps this from becoming a loop written in JSON.
+ * - **`InvokeResult.rows` stays flat**, in step order, with no label saying
+ *   which step a row came from — the same shape a batch of plain steps has
+ *   always answered. A composed operation of several legs does not change
+ *   that; the caller who needs to tell them apart has to know the shape of
+ *   each leg's answer ahead of time.
+ * - **This is not sold as faster.** What composing buys is measured in
+ *   round trips saved — a count read off the declaration, K − 1 for a batch
+ *   of K steps — not a duration: on loopback the difference between a
+ *   composed call and the flat calls it replaces was 0.099–0.131 ms, the
+ *   same size as the noise between two runs of the same measurement.
+ *   Nobody has measured it across a real network. What it does buy is
+ *   atomicity: the composed answer is one transaction and therefore one
+ *   state, where two separate calls could straddle a write landing between
+ *   them.
+ */
 export interface Step {
   name?: string;
-  action: string;
-  collection: string;
+  action?: string;
+  collection?: string;
   key?: Term;
   document?: Record<string, Term>;
   set?: Record<string, Term>;
   /** Whether the document this step names must, or must not, already be there. Absent (on the wire) means not checked. */
   exists?: boolean;
   require?: Condition[];
+  /** The name of an already-declared operation this step calls, instead of touching a collection directly. */
+  operation?: string;
+  /**
+   * Which declared version of `operation` this step runs — pinned, never
+   * the latest. Required (and must be greater than zero) whenever
+   * `operation` is set; `0` or absent is only ever meant for a step that
+   * touches a collection instead.
+   */
+  version?: number;
+  /** The arguments handed to `operation`, by the names its own declaration takes them under. */
+  with?: Record<string, Term>;
 }
 
 /**
