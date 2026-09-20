@@ -185,15 +185,19 @@ test("a connection string nobody signed for is refused", { skip }, async () => {
        error the caller sees carries the server's own code. That code reads
        "handshake", not "signature" — codeFor() on the Go side matches
        ErrHandshake before it ever gets a chance to see signing.ErrBadSignature,
-       because handshake() wraps the bad-signature error with "%w: %v" against
-       ErrHandshake, which drops the original error out of the errors.Is()
-       chain entirely (measured in internal/server/server_test.go on the Go
-       side; codeFor()/handshake() are out of scope for 0048 either way). */
+       That code used to read "handshake": handshake() wrapped the bad
+       signature with "%w: %v" against ErrHandshake, which dropped the
+       original out of the errors.Is() chain, so codeFor() could only see
+       the outer error. The Go side now wraps with "%w: %w", so the cause
+       survives and the code names it: "signature". The test was pinning the
+       older, less useful answer, and only says so now because it had never
+       actually been run -- it sits behind SAPEDB_SERVER_BIN, which CI does
+       not set. */
     await assert.rejects(
       () => client.invoke(forged, "notes.by_topic", { topic: "bound" }),
       (error) => {
         assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
-        assert.equal(error.code, "handshake");
+        assert.equal(error.code, "signature");
         return true;
       },
     );
@@ -553,7 +557,7 @@ test("invoking an explicit version reaches an older declaration after a redeclar
   }
 });
 
-test("catalogue on a database with nothing declared yet answers collections: null, not []", { skip }, async () => {
+test("catalogue on a database with nothing declared yet answers empty lists, not null", { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapedb-empty-"));
   const port = await freePort();
   const secret = "another-secret-for-the-empty-db-test";
@@ -587,13 +591,14 @@ test("catalogue on a database with nothing declared yet answers collections: nul
       await client.elevate(freshUrl, secret);
       const explored = await client.explore(freshUrl, { catalogue: true });
 
-      /* store.Catalogue.Collections carries no `omitempty`, and the loop that
-         fills it in only ever appends — starting from a `nil` slice, on a
-         database that has never had anything declared, it stays `nil`, and a
-         `nil` slice with no `omitempty` marshals as JSON `null`. A caller
-         that assumed `[]` here and reached straight for `.map` would break
-         on exactly the database that most needs this read to work. */
-      assert.equal(explored.here.collections, null, "a database with nothing declared yet should answer null, not []");
+      /* This used to answer `null`: Collections carries no `omitempty` and the
+         loop that fills it only ever appends, so on a database that has never
+         had anything declared it stayed a nil slice and marshalled as JSON
+         `null`. A caller that assumed `[]` and reached straight for `.map`
+         broke on exactly the database that most needs this read to work --
+         the empty one, which is everybody's first. The server now builds the
+         slice empty rather than nil, so both lists answer `[]`. */
+      assert.deepEqual(explored.here.collections, [], "an empty database should answer [], not null");
       assert.deepEqual(explored.here.operations, []);
     } finally {
       await client.close();
