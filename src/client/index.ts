@@ -120,35 +120,62 @@ export interface InvokeOptions {
    *
    * This is not a request for permissions — a caller cannot mint one, for the
    * same reason it cannot mint a connection string's own `sig`: `sig` is an
-   * HMAC made with the server's own secret over the account, the database and
-   * this exact set of scopes, minted by whoever issues connection strings and
-   * handed to the caller alongside the string itself (the server's
-   * `Server.Grant`, on the Go side that holds the secret; nothing here can do
-   * that). Presenting an edited `scopes` list without a matching `sig` fails
-   * to verify, the same as presenting no grant at all — a caller cannot widen
-   * what it holds by rewriting the list.
+   * HMAC made with the server's own secret over the account, the database,
+   * the scopes, the expiry and the serial together, minted by whoever issues
+   * connection strings and handed to the caller alongside the string itself
+   * (the server's `Server.Grant`, on the Go side that holds the secret;
+   * nothing here can do that). Presenting an edited `scopes`, `exp` or
+   * `serial` without a matching `sig` fails to verify, the same as presenting
+   * no grant at all — a caller cannot widen what it holds, or outlive it, by
+   * rewriting a field.
    *
    * Left out, this call presents no scopes, which is what every call did
    * before grants existed and is what every call still does that never sets
    * this: an operation declaring `scopes` refuses it with `not_allowed`,
    * naming the scope it needed. A `grant` whose `sig` does not verify — wrong
-   * secret, edited scopes, a grant minted for a different account or database
-   * — is refused with `grant` instead, before `not_allowed` is ever reached:
-   * a bad credential is a different problem from a missing permission.
+   * secret, an edited field, a grant minted for a different account or
+   * database — is refused with `grant` instead, before `not_allowed` is ever
+   * reached: a bad credential is a different problem from a missing
+   * permission. A grant whose signature verifies but whose `exp` has passed
+   * is refused with `grant_expired` — a different code again, because
+   * refreshing the grant and giving up are different answers and a caller
+   * needs to tell them apart without reading prose.
    */
   grant?: Grant;
 }
 
 /**
- * A set of scopes and the proof that the server's own secret vouches for them,
- * presented with an {@link InvokeOptions.grant}. Mirrors the server's `grant`
- * (see `internal/server/server.go`) and the signature `signing.Grants` checks
+ * A set of scopes, an expiry and a serial, and the proof that the server's
+ * own secret vouches for all four together — presented with an
+ * {@link InvokeOptions.grant}. Mirrors the server's `grant` (see
+ * `internal/server/server.go`) and the signature `signing.Grants` checks
  * (see `internal/signing/signing.go`).
+ *
+ * Every field is carried, none is computed. This package cannot make `sig`,
+ * and cannot make an `exp` or a `serial` that a `sig` would cover — they
+ * arrive together from whoever issued the connection string, and this type is
+ * the envelope they travel in.
  */
 export interface Grant {
   /** The scopes this grant claims. Order and repetition do not matter to the server, but are sent exactly as given. */
   scopes: string[];
-  /** Lower-case hex HMAC over `account_id:dbname:scopes` under the server's `sapedb/scopes:v1` key. Not something this package can produce — see {@link InvokeOptions.grant}. */
+  /**
+   * When this grant stops being one, as whole Unix seconds UTC — the same
+   * unit `signing.GrantMessage` signs and `signing.Grants` checks against its
+   * own clock, with no allowance for skew. Mandatory: a grant with no expiry
+   * is not a smaller grant, it is the thing this field exists to abolish, and
+   * leaving it out sends `0`, which never verifies.
+   */
+  exp: number;
+  /**
+   * Names this particular grant, for a future revocation list to name.
+   * Carried and signed; nothing on the server verifies it *against* anything
+   * yet — but it is still mandatory, because a grant issued after this field
+   * existed was signed over it, and leaving it out sends `""`, which does not
+   * match that signature.
+   */
+  serial: string;
+  /** Lower-case hex HMAC over the label, the account, the database, the scope list, `exp` and `serial`, under the server's `sapedb/scopes:v2` key. Not something this package can produce — see {@link InvokeOptions.grant}. */
   sig: string;
 }
 
@@ -1181,9 +1208,18 @@ export function Client(options: ClientOptions): ClientClass {
       if (invokeOptions.version) body.version = invokeOptions.version;
       // Omitted entirely when nothing was presented, so a call that never
       // sets this sends exactly the bytes it sent before grants existed —
-      // fail-closed, matching the Go client's wire.go.
+      // fail-closed, matching the Go client's wire.go. `exp` and `serial` are
+      // sent whenever `grant` is, never left off: the server's one message
+      // shape has no branch for a grant missing either, and a client that
+      // omitted them would silently send `exp:0`/`serial:""` and be refused
+      // under `grant` rather than the field it actually forgot.
       if (invokeOptions.grant) {
-        body.grant = { scopes: invokeOptions.grant.scopes, sig: invokeOptions.grant.sig };
+        body.grant = {
+          scopes: invokeOptions.grant.scopes,
+          exp: invokeOptions.grant.exp,
+          serial: invokeOptions.grant.serial,
+          sig: invokeOptions.grant.sig,
+        };
       }
 
       try {

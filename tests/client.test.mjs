@@ -1,6 +1,7 @@
 /* Against the built package in dist/, the thing that ships. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 const { Client } = await import(new URL("../dist/client/index.mjs", import.meta.url).href);
 const { FrameDecoder, encodeJsonFrame, decodeJsonPayload, FrameType } = await import(
@@ -321,7 +322,7 @@ test("invoke sends no grant field when none was given, matching the wire from be
   assert.equal("grant" in seen[0], false, "a call with no grant option must not carry the field at all");
 });
 
-test("a grant given to invoke reaches the wire as {scopes, sig}, ISS-12", async () => {
+test("a grant given to invoke reaches the wire as {scopes, exp, serial, sig}, ISS-12/ISS-11", async () => {
   const seen = [];
   const store = fakeStore({ answer: (body) => (seen.push(body), { ok: true }) });
   const client = new (Client({ transport: store.transport, logger: quiet }))();
@@ -330,10 +331,120 @@ test("a grant given to invoke reaches the wire as {scopes, sig}, ISS-12", async 
     url(),
     "articles.by_author",
     { author: "ann" },
-    { grant: { scopes: ["articles:read", "reports"], sig: "deadbeef" } },
+    { grant: { scopes: ["articles:read", "reports"], exp: 1789995600, serial: "01K5ZQ9P7B3N4M6R8T0V2W4X6Y", sig: "deadbeef" } },
   );
 
-  assert.deepEqual(seen[0].grant, { scopes: ["articles:read", "reports"], sig: "deadbeef" }, "the grant must reach the wire exactly as given, under the field name the server reads");
+  assert.deepEqual(
+    seen[0].grant,
+    { scopes: ["articles:read", "reports"], exp: 1789995600, serial: "01K5ZQ9P7B3N4M6R8T0V2W4X6Y", sig: "deadbeef" },
+    "the grant must reach the wire exactly as given, under the field names the server reads",
+  );
+});
+
+/* ---- ISS-11: grant carries exp and serial, checked against the shared fixture ----
+ *
+ * fixtures/signing.json gained a top-level "grant" section (refreshed from
+ * the server at commit eab1674) with seven vectors, each carrying its
+ * fields, the exact message bytes the server signs, and the sig those bytes
+ * produce. This client never computes that message or that signature — it
+ * only carries the fields it was handed — but that is exactly what these
+ * vectors let this suite check for the first time: against a contract
+ * neither side wrote for the occasion, not against this package's own
+ * assumptions about itself.
+ *
+ * `canonicalScopeList` and `grantMessage` below are test-only tooling, the
+ * same as `mintGrant` in tests/server.test.mjs — reproducing
+ * `internal/signing/signing.go`'s `scopeList` and `GrantMessage` to prove
+ * this suite's understanding of the wire against the fixture, not something
+ * this package ships or needs at runtime.
+ */
+const fixture = JSON.parse(readFileSync(new URL("../fixtures/signing.json", import.meta.url), "utf8"));
+
+function canonicalScopeList(scopes) {
+  return [...new Set(scopes)].sort().join(",");
+}
+
+function counted(value) {
+  return `${Buffer.byteLength(value, "utf8")}:${value}\n`;
+}
+
+function grantMessage({ accountId, dbname, scopes, exp, serial }) {
+  return (
+    "sapedb/scopes:v2\n" +
+    counted(accountId) +
+    counted(dbname) +
+    counted(canonicalScopeList(scopes)) +
+    counted(String(exp)) +
+    counted(serial)
+  );
+}
+
+test("fixture: the grant section exists, is v2, and carries all seven vectors", () => {
+  // An empty result is not evidence — this is the positive control for every
+  // test below that reads fixture.grant.cases: if the section were missing
+  // or came back empty, every one of them would iterate zero times and pass
+  // having asserted nothing.
+  assert.ok(fixture.grant, "fixtures/signing.json must carry a top-level grant section");
+  assert.equal(fixture.grant.label, "sapedb/scopes:v2");
+  assert.equal(fixture.grant.cases.length, 7, "the refreshed fixture ships exactly seven grant vectors");
+});
+
+test("fixture: this suite's own reconstruction of the signed message matches every vector, byte for byte", () => {
+  for (const vector of fixture.grant.cases) {
+    assert.equal(grantMessage(vector), vector.message, vector.name);
+  }
+});
+
+test("fixture: the payload invoke() builds for a vector's fields matches that vector exactly", async () => {
+  for (const vector of fixture.grant.cases) {
+    const seen = [];
+    const store = fakeStore({ answer: (body) => (seen.push(body), { ok: true }) });
+    const client = new (Client({ transport: store.transport, logger: quiet }))();
+
+    await client.invoke(
+      url(),
+      "articles.by_author",
+      {},
+      { grant: { scopes: vector.scopes, exp: vector.exp, serial: vector.serial, sig: vector.sig } },
+    );
+
+    assert.deepEqual(
+      seen[0].grant,
+      { scopes: vector.scopes, exp: vector.exp, serial: vector.serial, sig: vector.sig },
+      `${vector.name}: the wire body must carry exactly this vector's fields`,
+    );
+  }
+});
+
+test("fixture: vectors 1 and 2 (same scopes, reordered, with a repeat) canonicalise to the identical scope list and message", () => {
+  const [plain, reordered] = fixture.grant.cases;
+
+  assert.notDeepEqual(plain.scopes, reordered.scopes, "the two vectors must be written differently, or this proves nothing");
+  assert.equal(canonicalScopeList(plain.scopes), canonicalScopeList(reordered.scopes));
+  assert.equal(canonicalScopeList(reordered.scopes), "articles:read,billing:write");
+  assert.equal(grantMessage(plain), grantMessage(reordered), "reordering and repeating a scope must not change the signed message");
+  assert.equal(plain.sig, reordered.sig, "the fixture itself must agree they sign identically");
+});
+
+test("fixture: vectors 5 and 6 are the collision pair a colon-joined message would confuse, and must differ here", () => {
+  const [eatsExpiry, otherHalf] = fixture.grant.cases.slice(4, 6);
+
+  assert.deepEqual(eatsExpiry.scopes, ["x"]);
+  assert.equal(eatsExpiry.exp, 100);
+  assert.equal(eatsExpiry.serial, "200:z");
+  assert.deepEqual(otherHalf.scopes, ["x:100"]);
+  assert.equal(otherHalf.exp, 200);
+  assert.equal(otherHalf.serial, "z");
+
+  // The naive delimiter-joined form both tuples would produce, if the
+  // message were "account:dbname:scopes:exp:serial" instead of
+  // length-prefixed — this is the collision ISS-11 exists to close.
+  const naive = (v) => `acme:main:${canonicalScopeList(v.scopes)}:${v.exp}:${v.serial}`;
+  assert.equal(naive(eatsExpiry), naive(otherHalf), "the naive join must collide, or this is not the pair the ticket describes");
+
+  // The actual, length-prefixed message must not.
+  assert.notEqual(grantMessage(eatsExpiry), grantMessage(otherHalf), "the real message must not collide where the naive one does");
+  assert.notEqual(eatsExpiry.sig, otherHalf.sig, "two different grants must not share one signature");
 });
 
 test("a store that will not answer costs one timeout, not a hung call", async () => {

@@ -107,25 +107,36 @@
   users. The generated header names its source either way, with a connection
   string's password and signature redacted.
 
-- `InvokeOptions.grant` (ISS-12): `invoke` can now present a scope grant, so an
-  operation declared with `scopes` (added to the wire in 1.0.0) is one this
-  client can actually call. Before this, `grep -riF grant src/` found
-  nothing — the Go client could present a grant (`Client.Present`,
+- `InvokeOptions.grant` (ISS-12, reshaped by ISS-11): `invoke` can now present
+  a scope grant, so an operation declared with `scopes` (added to the wire in
+  1.0.0) is one this client can actually call. Before this, `grep -riF grant
+  src/` found nothing — the Go client could present a grant (`Client.Present`,
   `sapedb.go`) and this one could not, so a scoped operation was reachable
   from two of three clients.
 
-  `invoke(target, command, args, { grant: { scopes, sig } })` sends
-  `{"grant":{"scopes":[...],"sig":"..."}}` on the wire, omitted entirely when
-  no grant is given — matching what every call sent before grants existed, and
-  matching the Go client's own `wire.go`. `sig` is an HMAC the server's secret
-  makes over the account, the database and the exact scope list
-  (`internal/signing/signing.go`'s `GrantLabel`/`Granting`/`Grants`); nothing
-  here can mint one, on purpose — that needs the secret this client is never
-  given, and minting stays the server's `Server.Grant`. A grant that does not
-  verify is refused with code `grant`; an operation whose scopes were never
-  presented at all is refused with `not_allowed`, naming the scope it needed —
-  two different codes for two different problems, both proven end to end
-  against a real daemon in `tests/server.test.mjs`.
+  `invoke(target, command, args, { grant: { scopes, exp, serial, sig } })`
+  sends `{"grant":{"scopes":[...],"exp":1789995600,"serial":"...","sig":"..."}}`
+  on the wire, omitted entirely when no grant is given — matching what every
+  call sent before grants existed, and matching the Go client's own
+  `wire.go`. `exp` (whole Unix seconds UTC) and `serial` are mandatory
+  whenever `grant` is presented, not optional fields with a default: the
+  server has one message shape and one branch that reads it, and a grant that
+  left either out would silently send `exp: 0`/`serial: ""` and simply fail
+  to verify. `sig` is an HMAC the server's secret makes over the label, the
+  account, the database, the canonical scope list, `exp` and `serial`
+  together, length-prefixed rather than delimiter-joined
+  (`internal/signing/signing.go`'s `GrantLabel`/`GrantMessage`/`Granting`/
+  `Grants`, label `sapedb/scopes:v2`); nothing here can mint one, on
+  purpose — that needs the secret this client is never given, and minting
+  stays the server's `Server.Grant`. A grant that does not verify is refused
+  with code `grant`; one that verifies but whose `exp` has passed is refused
+  with `grant_expired` instead — a different code, because refreshing the
+  grant and giving up are different answers; an operation whose scopes were
+  never presented at all is refused with `not_allowed`, naming the scope it
+  needed. Three different codes for three different problems, all proven end
+  to end against a real daemon in `tests/server.test.mjs`, and the payload
+  this client builds checked against `fixtures/signing.json`'s seven grant
+  vectors in `tests/client.test.mjs`.
 
 - `elevate` and `explore`: the operator shell, frame types 11 and 12. Two
   measurements (an R&D pass over the desktop app and a planner pass over the

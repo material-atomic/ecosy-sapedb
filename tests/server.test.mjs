@@ -87,20 +87,30 @@ const schema = {
 };
 
 /**
- * The exact bytes a scope grant signs, and the HMAC that makes them worth
- * something: `account_id ":" dbname ":" scope[,scope...]`, sorted and
- * de-duplicated, under a key derived from the server's secret with the label
- * `sapedb/scopes:v1`. Read from internal/signing/signing.go (GrantLabel,
- * Held, Granting) rather than guessed — this is test-only tooling to prove
- * the wire round trip, not a minting function this package ships: a client
- * cannot hold the server's secret, and this test only can because it is the
- * one side of the suite standing in for whoever issues connection strings.
+ * The exact bytes a scope grant signs (ISS-11): the label, a newline, then
+ * account_id, dbname, the canonical scope list, exp and serial, each written
+ * as `<byte length>:<field>\n` — under a key derived from the server's secret
+ * with the label `sapedb/scopes:v2`. Read from internal/signing/signing.go
+ * (GrantLabel, GrantMessage, Granting) rather than guessed, and checked
+ * against `fixtures/signing.json`'s `grant.cases` in
+ * `tests/client.test.mjs` before this file trusted it — this is test-only
+ * tooling to prove the wire round trip, not a minting function this package
+ * ships: a client cannot hold the server's secret, and this test only can
+ * because it is the one side of the suite standing in for whoever issues
+ * connection strings.
  */
-function mintGrant(secret, accountId, dbname, scopes) {
+function counted(value) {
+  return `${Buffer.byteLength(value, "utf8")}:${value}\n`;
+}
+
+function grantMessage(accountId, dbname, scopes, exp, serial) {
   const list = [...new Set(scopes)].sort().join(",");
-  const message = `${accountId}:${dbname}:${list}`;
-  const key = createHmac("sha256", secret).update("sapedb/scopes:v1").digest();
-  return createHmac("sha256", key).update(message).digest("hex");
+  return "sapedb/scopes:v2\n" + counted(accountId) + counted(dbname) + counted(list) + counted(String(exp)) + counted(serial);
+}
+
+function mintGrant(secret, accountId, dbname, scopes, exp, serial) {
+  const key = createHmac("sha256", secret).update("sapedb/scopes:v2").digest();
+  return createHmac("sha256", key).update(grantMessage(accountId, dbname, scopes, exp, serial)).digest("hex");
 }
 
 let server;
@@ -1002,26 +1012,35 @@ test("catalogue on a database with nothing declared yet answers empty lists, not
   }
 });
 
-/* ---- ISS-12: presenting a scope grant ----
+/* ---- ISS-12 / ISS-11: presenting a scope grant, one that carries an expiry ----
  *
- * Before this, `grep -riF grant src/` found nothing: the driver had no way to
- * attach a grant to a call, so an operation declaring `scopes` was one this
- * client could never run — the Go client could (`Client.Present`,
- * sapedb.go), so scope was a feature two of three clients could use. Four
- * cases, each measured against the positive control it needs to mean
- * anything:
+ * Before ISS-12, `grep -riF grant src/` found nothing: the driver had no way
+ * to attach a grant to a call, so an operation declaring `scopes` was one
+ * this client could never run — the Go client could (`Client.Present`,
+ * sapedb.go), so scope was a feature two of three clients could use. ISS-11
+ * then changed the grant this client had just learned to carry: `exp` and
+ * `serial` joined `scopes` and `sig` inside the signature, both mandatory,
+ * and the message that signs them turned length-prefixed. The cases below
+ * carry both changes, each measured against the positive control it needs to
+ * mean anything:
  *
  *  1. The positive control itself: an unscoped operation runs with no grant
  *     and answers real rows. If `notes` were empty this would pass for the
  *     wrong reason, so it writes its own row first and checks the count.
  *  2. The scoped twin of that same read, called with no grant at all: refused
  *     `not_allowed`, naming the missing scope.
- *  3. The scoped twin, called with a grant this test mints correctly: it
- *     runs, and answers the same real row case 1 proved existed — the thing
- *     that was impossible before this change.
+ *  3. The scoped twin, called with a grant this test mints correctly —
+ *     scopes, an `exp` in the future and a `serial` all inside the
+ *     signature — it runs, and answers the same real row case 1 proved
+ *     existed: the thing that was impossible before ISS-12, and would be
+ *     refused again today without carrying ISS-11's two new fields.
  *  4. The scoped twin, called with a grant whose signature is wrong: refused
  *     `grant`, not `not_allowed` — a bad credential is a different problem
  *     from a missing permission, and the two must not collapse into one code.
+ *  5. The scoped twin, called with a grant that verifies but whose `exp` has
+ *     already passed: refused `grant_expired`, not `grant` — a caller told
+ *     to go get a fresh grant is not the caller told its credential was never
+ *     any good, and ISS-21 was about exactly that distinction getting lost.
  */
 test("ISS-12: an unscoped read runs with no grant and answers real data (positive control)", { skip }, async () => {
   const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
@@ -1072,9 +1091,11 @@ test("ISS-12: the same scoped read, presented with a valid grant, runs and answe
     assert.equal(typeof written.key, "string");
 
     const scopes = ["notes:scoped_read"];
-    const sig = mintGrant(SECRET, "acme", "main", scopes);
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const serial = "iss-12-valid-grant-01";
+    const sig = mintGrant(SECRET, "acme", "main", scopes, exp, serial);
 
-    const read = await client.invoke(url, "notes.by_topic_scoped", { topic }, { grant: { scopes, sig } });
+    const read = await client.invoke(url, "notes.by_topic_scoped", { topic }, { grant: { scopes, exp, serial, sig } });
     assert.equal(read.count, 1, "the collection must not be empty, or this proves nothing");
     assert.equal(read.rows[0].body, "readable with a grant");
   } finally {
@@ -1091,15 +1112,47 @@ test("ISS-12: a grant with the wrong signature is refused grant, not not_allowed
     await client.invoke(url, "notes.add", { body: "should stay unreadable here too", topic }, { write: true });
 
     const scopes = ["notes:scoped_read"];
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const serial = "iss-12-bad-signature-01";
     // Minted under the right message but the wrong secret — the shape of a
     // forged, copied, or edited grant, not a typo in the scope list.
-    const sig = mintGrant("not-the-real-secret", "acme", "main", scopes);
+    const sig = mintGrant("not-the-real-secret", "acme", "main", scopes, exp, serial);
 
     await assert.rejects(
-      () => client.invoke(url, "notes.by_topic_scoped", { topic }, { grant: { scopes, sig } }),
+      () => client.invoke(url, "notes.by_topic_scoped", { topic }, { grant: { scopes, exp, serial, sig } }),
       (error) => {
         assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
         assert.equal(error.code, "grant", "a grant that does not verify must be refused by its own code, not folded into not_allowed");
+        return true;
+      },
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test("ISS-11: a grant that verifies but has already expired is refused grant_expired, not grant", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    const topic = "iss-11-expired-grant";
+    await client.invoke(url, "notes.add", { body: "should stay unreadable, the grant is expired", topic }, { write: true });
+
+    const scopes = ["notes:scoped_read"];
+    // A minute in the past: minted correctly, over the server's own secret,
+    // for the right account, database and scopes — the only thing wrong with
+    // it is that its exp has already passed.
+    const exp = Math.floor(Date.now() / 1000) - 60;
+    const serial = "iss-11-expired-01";
+    const sig = mintGrant(SECRET, "acme", "main", scopes, exp, serial);
+
+    await assert.rejects(
+      () => client.invoke(url, "notes.by_topic_scoped", { topic }, { grant: { scopes, exp, serial, sig } }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "grant_expired", "an expired grant must be refused by its own code, not folded into grant");
+        assert.notEqual(error.code, "grant", "expired and never-valid must not collapse into one code");
         return true;
       },
     );
