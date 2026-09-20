@@ -1,0 +1,208 @@
+name: Publish
+
+# The file name is part of the contract: npmjs.com Settings -> Trusted
+# publishing -> "Workflow filename" must read exactly "publish.yml". Renaming
+# this file means re-typing it there too.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run every step EXCEPT the real `npm publish` (rehearsal only)'
+        type: boolean
+        default: true
+
+# id-token: write is what lets this job mint an OIDC token at all. Without it
+# npm's trusted-publishing exchange fails with ENEEDAUTH. No NPM_TOKEN, and no
+# secrets.* naming npm anywhere in this file, on purpose.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest # Trusted Publishing does not support self-hosted runners.
+
+    # Empty ON PURPOSE, at job level so every step inherits it. setup-node with
+    # registry-url writes an .npmrc containing the literal ${NODE_AUTH_TOKEN};
+    # Trusted Publishing never sets that variable, and yarn 1 refuses to run any
+    # command with an unresolvable placeholder in its config. Measured on
+    # @ecosy/next, run 35470299158: the job died at `yarn install` before
+    # anything was built, tested or published.
+    env:
+      NODE_AUTH_TOKEN: ""
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # no cache in a release build
+
+      - name: Report toolchain versions actually on this runner
+        run: |
+          echo "node: $(node -v)"
+          echo "npm:  $(npm -v)"
+          echo "yarn: $(yarn -v)"
+
+      # docs.npmjs.com/trusted-publishers states a floor of npm 11.5.1.
+      # "node-version 24 surely ships a new enough npm" is a guess; this reads
+      # the real npm on the runner that is about to publish, and fails before
+      # install time is spent.
+      - name: Assert npm satisfies the Trusted Publishing floor (>= 11.5.1)
+        run: |
+          NPM_VERSION=$(npm -v)
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            const ok = major > 11 || (major === 11 && minor > 5) || (major === 11 && minor === 5 && patch >= 1);
+            if (!ok) {
+              console.error(`npm ${process.argv[1]} is below 11.5.1, the floor Trusted Publishing requires. Add "npm install -g npm@latest" before this step, or raise node-version above.`);
+              process.exit(1);
+            }
+            console.log(`npm ${process.argv[1]} satisfies the Trusted Publishing floor`);
+          ' "$NPM_VERSION"
+
+      - name: Assert the pushed tag names package.json's version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "tag: v$TAG_VERSION   package.json: $PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "tag v$TAG_VERSION does not name package.json version $PKG_VERSION -- refusing to publish a version the tag does not claim to be." >&2
+            exit 1
+          fi
+
+      # This client's only reason to exist is talking to that server. Most of
+      # its suite runs without one, and that half has never been the half worth
+      # trusting: the tests that dial a real daemon are the only ones that can
+      # catch the two sides agreeing with themselves and disagreeing with each
+      # other. Cloned beside the checkout rather than inside it -- inside, this
+      # repository's own rename guard finds a second project in its tree and
+      # goes red, and beside at ../sapedb is where tests/types.test.mjs and
+      # tests/shipped.test.mjs already look.
+      - name: Clone the server this client claims to speak to
+        run: git clone --depth 1 https://github.com/sapedb/sapedb "$(dirname "$GITHUB_WORKSPACE")/sapedb"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ github.workspace }}/../sapedb/go.mod
+          cache-dependency-path: ${{ github.workspace }}/../sapedb/go.sum
+
+      - name: Build the daemon and the command line
+        working-directory: ${{ github.workspace }}/../sapedb
+        run: |
+          go build -o "$RUNNER_TEMP/sapedbd" ./cmd/sapedbd
+          go build -o "$RUNNER_TEMP/sapedb" ./cmd/sapedb
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build
+        run: yarn build
+
+      # Three assertions, because `node --test` exiting 0 says less than it
+      # looks like. Its exit code does not fall when the glob matches fewer
+      # files, so a floor on the pass count is the only thing that notices a
+      # suite that quietly shrank -- @ecosy/anchor shipped a floor of 1 and its
+      # reviewer proved 14 of 15 tests could be deleted while staying green.
+      # And a skipped test reads exactly like a passing one in the summary:
+      # fifteen tests here sat behind SAPEDB_SERVER_BIN and had never run once,
+      # two of them pinning behaviour the server had already changed.
+      - name: Run every test, against a real daemon, and assert what ran
+        env:
+          SAPEDB_SERVER_BIN: ${{ runner.temp }}/sapedbd
+          SAPEDB_CLI_BIN: ${{ runner.temp }}/sapedb
+        run: |
+          set -o pipefail
+          yarn test:run --test-reporter=tap | tee test-output.tap
+          PASS=$(grep -oE '(^|[^a-z])pass [0-9]+' test-output.tap | tail -1 | awk '{print $2}')
+          FAIL=$(grep -oE '(^|[^a-z])fail [0-9]+' test-output.tap | tail -1 | awk '{print $2}')
+          SKIPPED=$(grep -oE '(^|[^a-z])skipped [0-9]+' test-output.tap | tail -1 | awk '{print $2}')
+          echo "pass=$PASS fail=$FAIL skipped=$SKIPPED"
+          FLOOR=170
+          # An absent count is a failure, never a zero. A run that dies before
+          # printing its summary leaves nothing to read, and "" -lt 170 is a
+          # shell error, not an answer.
+          if [ -z "$PASS" ] || [ -z "$FAIL" ] || [ -z "$SKIPPED" ]; then
+            echo "the run printed no counts at all, so nothing here can be trusted." >&2
+            exit 1
+          fi
+          if [ "$PASS" -lt "$FLOOR" ]; then
+            echo "$PASS passing tests, below the floor of $FLOOR measured 2026-09-20 against a real daemon. Either the glob matched fewer files than it should, or a test was removed. Understand it before raising the tag." >&2
+            exit 1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "$FAIL failing test(s) -- see the TAP output above." >&2
+            exit 1
+          fi
+          if [ "$SKIPPED" -ne 0 ]; then
+            echo "$SKIPPED test(s) skipped in a release build. A skipped test is not a passing test." >&2
+            exit 1
+          fi
+
+      # tests/shipped.test.mjs already asks npm what the tarball would hold and
+      # requires the exports map to name every fixture in it. What it does not
+      # cover is dist/: a tree that was never built packs cleanly, exits 0, and
+      # warns about nothing -- @ecosy/next measured exactly that, three files
+      # and a green publish.
+      - name: Assert the tarball carries a build, not just metadata
+        run: |
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const packed = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"], { encoding: "utf8" }));
+            const files = packed[0].files.map((f) => f.path);
+            const dist = files.filter((p) => p.startsWith("dist/"));
+            console.log(`total files: ${files.length}, of them ${dist.length} under dist/`);
+            if (dist.length < 10) {
+              console.error(`only ${dist.length} files under dist/ -- this tarball has no usable build in it.`);
+              process.exit(1);
+            }
+            for (const entry of ["dist/index.js", "fixtures/frames.json", "fixtures/signing.json"]) {
+              if (!files.includes(entry)) {
+                console.error(`${entry} is not in the tarball.`);
+                process.exit(1);
+              }
+            }
+          '
+
+      # Dry-run only. Prints five named claims and never the token, so the
+      # identity this runner presents can be compared against the fields under
+      # npmjs.com Settings -> Trusted publishing before any tag is pushed.
+      - name: Print OIDC claims for comparison against npm Trusted Publisher settings (dry-run only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -sS -f -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org")
+          node -e '
+            const { value } = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const b64 = value.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+            const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
+            const claims = JSON.parse(Buffer.from(b64 + pad, "base64").toString("utf8"));
+            console.log("OIDC claims this run presents to npm:");
+            for (const key of ["repository", "repository_owner", "workflow_ref", "environment", "sub"]) {
+              console.log(`  ${key}: ${JSON.stringify(claims[key] ?? null)}`);
+            }
+          ' <<< "$RESPONSE"
+
+      # The one line in this file that reaches the registry for real, and only
+      # on a tag push. --ignore-scripts because build and test already ran as
+      # named steps above: every script on this path is visible in this file.
+      # --tag is required for a prerelease, or npm publishes it straight to
+      # latest without saying so.
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          case "$VERSION" in
+            *-*) npm publish --ignore-scripts --provenance --access public --tag next ;;
+            *)   npm publish --ignore-scripts --provenance --access public ;;
+          esac
