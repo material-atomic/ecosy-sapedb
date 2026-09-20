@@ -20,6 +20,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
+import { createHmac } from "node:crypto";
 
 import { Client } from "../dist/client/index.mjs";
 import { nodeTransport } from "../dist/node/index.mjs";
@@ -66,8 +67,41 @@ const schema = {
       from: { terms: [{ arg: "topic" }] },
       to: { terms: [{ arg: "topic" }] },
     },
+    /* Task ISS-12: the same read as notes.by_topic, but declaring a scope it
+       may not run without. Kept as its own operation, declared alongside the
+       plain one in the same schema, so the two can be measured against each
+       other with nothing else different between them — same data, same
+       action, same index, one gate. */
+    {
+      name: "notes.by_topic_scoped",
+      collection: "notes",
+      action: "scan",
+      index: "by_topic",
+      limit: 10,
+      input: [{ name: "topic", type: "string", required: true }],
+      from: { terms: [{ arg: "topic" }] },
+      to: { terms: [{ arg: "topic" }] },
+      scopes: ["notes:scoped_read"],
+    },
   ],
 };
+
+/**
+ * The exact bytes a scope grant signs, and the HMAC that makes them worth
+ * something: `account_id ":" dbname ":" scope[,scope...]`, sorted and
+ * de-duplicated, under a key derived from the server's secret with the label
+ * `sapedb/scopes:v1`. Read from internal/signing/signing.go (GrantLabel,
+ * Held, Granting) rather than guessed — this is test-only tooling to prove
+ * the wire round trip, not a minting function this package ships: a client
+ * cannot hold the server's secret, and this test only can because it is the
+ * one side of the suite standing in for whoever issues connection strings.
+ */
+function mintGrant(secret, accountId, dbname, scopes) {
+  const list = [...new Set(scopes)].sort().join(",");
+  const message = `${accountId}:${dbname}:${list}`;
+  const key = createHmac("sha256", secret).update("sapedb/scopes:v1").digest();
+  return createHmac("sha256", key).update(message).digest("hex");
+}
 
 let server;
 let url;
@@ -776,6 +810,112 @@ test("catalogue on a database with nothing declared yet answers empty lists, not
     }
   } finally {
     proc.kill("SIGTERM");
+  }
+});
+
+/* ---- ISS-12: presenting a scope grant ----
+ *
+ * Before this, `grep -riF grant src/` found nothing: the driver had no way to
+ * attach a grant to a call, so an operation declaring `scopes` was one this
+ * client could never run — the Go client could (`Client.Present`,
+ * sapedb.go), so scope was a feature two of three clients could use. Four
+ * cases, each measured against the positive control it needs to mean
+ * anything:
+ *
+ *  1. The positive control itself: an unscoped operation runs with no grant
+ *     and answers real rows. If `notes` were empty this would pass for the
+ *     wrong reason, so it writes its own row first and checks the count.
+ *  2. The scoped twin of that same read, called with no grant at all: refused
+ *     `not_allowed`, naming the missing scope.
+ *  3. The scoped twin, called with a grant this test mints correctly: it
+ *     runs, and answers the same real row case 1 proved existed — the thing
+ *     that was impossible before this change.
+ *  4. The scoped twin, called with a grant whose signature is wrong: refused
+ *     `grant`, not `not_allowed` — a bad credential is a different problem
+ *     from a missing permission, and the two must not collapse into one code.
+ */
+test("ISS-12: an unscoped read runs with no grant and answers real data (positive control)", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    const topic = "iss-12-baseline";
+    const written = await client.invoke(url, "notes.add", { body: "unscoped and fine", topic }, { write: true });
+    assert.equal(typeof written.key, "string");
+
+    const read = await client.invoke(url, "notes.by_topic", { topic });
+    assert.equal(read.count, 1, "the collection must not be empty, or every case below proves nothing");
+    assert.equal(read.rows[0].body, "unscoped and fine");
+  } finally {
+    await client.close();
+  }
+});
+
+test("ISS-12: the scoped twin of that same read, called with no grant, is refused not_allowed naming the missing scope", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    const topic = "iss-12-no-grant";
+    await client.invoke(url, "notes.add", { body: "should stay unreadable here", topic }, { write: true });
+
+    await assert.rejects(
+      () => client.invoke(url, "notes.by_topic_scoped", { topic }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "not_allowed");
+        assert.match(error.message, /notes:scoped_read/, "the refusal must name the scope that was missing");
+        return true;
+      },
+    );
+  } finally {
+    await client.close();
+  }
+});
+
+test("ISS-12: the same scoped read, presented with a valid grant, runs and answers the real row (impossible before this change)", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    const topic = "iss-12-valid-grant";
+    const written = await client.invoke(url, "notes.add", { body: "readable with a grant", topic }, { write: true });
+    assert.equal(typeof written.key, "string");
+
+    const scopes = ["notes:scoped_read"];
+    const sig = mintGrant(SECRET, "acme", "main", scopes);
+
+    const read = await client.invoke(url, "notes.by_topic_scoped", { topic }, { grant: { scopes, sig } });
+    assert.equal(read.count, 1, "the collection must not be empty, or this proves nothing");
+    assert.equal(read.rows[0].body, "readable with a grant");
+  } finally {
+    await client.close();
+  }
+});
+
+test("ISS-12: a grant with the wrong signature is refused grant, not not_allowed", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    const topic = "iss-12-bad-signature";
+    await client.invoke(url, "notes.add", { body: "should stay unreadable here too", topic }, { write: true });
+
+    const scopes = ["notes:scoped_read"];
+    // Minted under the right message but the wrong secret — the shape of a
+    // forged, copied, or edited grant, not a typo in the scope list.
+    const sig = mintGrant("not-the-real-secret", "acme", "main", scopes);
+
+    await assert.rejects(
+      () => client.invoke(url, "notes.by_topic_scoped", { topic }, { grant: { scopes, sig } }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "grant", "a grant that does not verify must be refused by its own code, not folded into not_allowed");
+        return true;
+      },
+    );
+  } finally {
+    await client.close();
   }
 });
 

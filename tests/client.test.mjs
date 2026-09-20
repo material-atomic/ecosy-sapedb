@@ -311,6 +311,31 @@ test("a read is retried without an id; a write with one given by the caller keep
   assert.deepEqual(seen, [undefined, "01ARZ3NDEKTSV4RRFFQ69G5FAV"], "a read needs no id; an id the caller kept is the one sent");
 });
 
+test("invoke sends no grant field when none was given, matching the wire from before grants existed", async () => {
+  const seen = [];
+  const store = fakeStore({ answer: (body) => (seen.push(body), { ok: true }) });
+  const client = new (Client({ transport: store.transport, logger: quiet }))();
+
+  await client.invoke(url(), "orders.list");
+
+  assert.equal("grant" in seen[0], false, "a call with no grant option must not carry the field at all");
+});
+
+test("a grant given to invoke reaches the wire as {scopes, sig}, ISS-12", async () => {
+  const seen = [];
+  const store = fakeStore({ answer: (body) => (seen.push(body), { ok: true }) });
+  const client = new (Client({ transport: store.transport, logger: quiet }))();
+
+  await client.invoke(
+    url(),
+    "articles.by_author",
+    { author: "ann" },
+    { grant: { scopes: ["articles:read", "reports"], sig: "deadbeef" } },
+  );
+
+  assert.deepEqual(seen[0].grant, { scopes: ["articles:read", "reports"], sig: "deadbeef" }, "the grant must reach the wire exactly as given, under the field name the server reads");
+});
+
 test("a store that will not answer costs one timeout, not a hung call", async () => {
   const store = fakeStore({ answer: () => ({ delay: 5_000 }) });
   const client = new (Client({ transport: store.transport, requestTimeout: 30, logger: quiet }))();

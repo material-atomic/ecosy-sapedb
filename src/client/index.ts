@@ -114,6 +114,42 @@ export interface InvokeOptions {
    * `omitempty` — an explicit zero would be a difference with no meaning.
    */
   version?: number;
+  /**
+   * The scope grant to present with this call, for an operation declared with
+   * {@link Operation.scopes}.
+   *
+   * This is not a request for permissions — a caller cannot mint one, for the
+   * same reason it cannot mint a connection string's own `sig`: `sig` is an
+   * HMAC made with the server's own secret over the account, the database and
+   * this exact set of scopes, minted by whoever issues connection strings and
+   * handed to the caller alongside the string itself (the server's
+   * `Server.Grant`, on the Go side that holds the secret; nothing here can do
+   * that). Presenting an edited `scopes` list without a matching `sig` fails
+   * to verify, the same as presenting no grant at all — a caller cannot widen
+   * what it holds by rewriting the list.
+   *
+   * Left out, this call presents no scopes, which is what every call did
+   * before grants existed and is what every call still does that never sets
+   * this: an operation declaring `scopes` refuses it with `not_allowed`,
+   * naming the scope it needed. A `grant` whose `sig` does not verify — wrong
+   * secret, edited scopes, a grant minted for a different account or database
+   * — is refused with `grant` instead, before `not_allowed` is ever reached:
+   * a bad credential is a different problem from a missing permission.
+   */
+  grant?: Grant;
+}
+
+/**
+ * A set of scopes and the proof that the server's own secret vouches for them,
+ * presented with an {@link InvokeOptions.grant}. Mirrors the server's `grant`
+ * (see `internal/server/server.go`) and the signature `signing.Grants` checks
+ * (see `internal/signing/signing.go`).
+ */
+export interface Grant {
+  /** The scopes this grant claims. Order and repetition do not matter to the server, but are sent exactly as given. */
+  scopes: string[];
+  /** Lower-case hex HMAC over `account_id:dbname:scopes` under the server's `sapedb/scopes:v1` key. Not something this package can produce — see {@link InvokeOptions.grant}. */
+  sig: string;
 }
 
 export interface SubscribeOptions {
@@ -1077,6 +1113,12 @@ export function Client(options: ClientOptions): ClientClass {
       }
       if (writeId) body.writeId = writeId;
       if (invokeOptions.version) body.version = invokeOptions.version;
+      // Omitted entirely when nothing was presented, so a call that never
+      // sets this sends exactly the bytes it sent before grants existed —
+      // fail-closed, matching the Go client's wire.go.
+      if (invokeOptions.grant) {
+        body.grant = { scopes: invokeOptions.grant.scopes, sig: invokeOptions.grant.sig };
+      }
 
       try {
         return (await send(parsed, FrameType.invoke, body, invokeOptions.timeout ?? requestTimeout)) as Result;
