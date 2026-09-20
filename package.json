@@ -80,7 +80,9 @@
       "import": "./dist/types/index.mjs",
       "require": "./dist/types/index.js"
     },
-    "./fixtures/signing.json": "./fixtures/signing.json"
+    "./fixtures/signing.json": "./fixtures/signing.json",
+    "./fixtures/frames.json": "./fixtures/frames.json",
+    "./fixtures/ledger.schema.json": "./fixtures/ledger.schema.json"
   },
   "scripts": {
     "clean": "rimraf dist",
