@@ -36,26 +36,29 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Cloned OUTSIDE the workspace on purpose. actions/checkout can only
-      # place a repository inside it, and this repository has a guard that
-      # walks its whole tree for a name it renamed away from. A second
-      # project's source sitting in .server/ trips that guard -- correctly:
-      # the guard is not wrong about what it found, the checkout was wrong
-      # about where to put it.
+      # Cloned BESIDE the checkout, not inside it, and the place is not
+      # arbitrary. Inside, a guard that walks this repository's tree for a
+      # name it renamed away from finds a second project's source and goes
+      # red -- correctly. Beside, at ../sapedb, is where tests/types.test.mjs
+      # already looks for the Go repo when it compares the ledger schema
+      # against the one the server ships; put it anywhere else and that test
+      # skips itself, which is how it has always behaved and why nobody knew
+      # it was there. actions/checkout cannot target a path outside the
+      # workspace, so this is a plain clone.
       - name: Clone the server this client claims to speak to
-        run: git clone --depth 1 https://github.com/sapedb/sapedb "$RUNNER_TEMP/server"
+        run: git clone --depth 1 https://github.com/sapedb/sapedb "$(dirname "$GITHUB_WORKSPACE")/sapedb"
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: ${{ runner.temp }}/server/go.mod
-          cache-dependency-path: ${{ runner.temp }}/server/go.sum
+          go-version-file: ${{ github.workspace }}/../sapedb/go.mod
+          cache-dependency-path: ${{ github.workspace }}/../sapedb/go.sum
 
       - uses: actions/setup-node@v6
         with:
           node-version: 24
 
       - name: Build the daemon and the command line
-        working-directory: ${{ runner.temp }}/server
+        working-directory: ${{ github.workspace }}/../sapedb
         run: |
           go build -o "$RUNNER_TEMP/sapedbd" ./cmd/sapedbd
           go build -o "$RUNNER_TEMP/sapedb" ./cmd/sapedb
@@ -73,7 +76,10 @@ jobs:
         run: |
           set -o pipefail
           yarn test | tee "$RUNNER_TEMP/report.txt"
-          skipped=$(grep -E '^# skipped ' "$RUNNER_TEMP/report.txt" | awk '{print $3}')
+          # node --test prints "# skipped N" under the tap reporter and
+          # "<glyph> skipped N" under the spec reporter it picks in CI. Match
+          # the word and its number, not the line's decoration.
+          skipped=$(grep -oE '(^|[^a-z])skipped [0-9]+' "$RUNNER_TEMP/report.txt" | tail -1 | awk '{print $2}')
           if [ -z "$skipped" ]; then
             echo "::error::the run printed no skip count at all, so nothing here can be trusted."
             exit 1
