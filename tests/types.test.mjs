@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const { typesFor } = await import(new URL("../dist/types/index.mjs", import.meta.url).href);
+const { typesFor, schemaFromServer } = await import(new URL("../dist/types/index.mjs", import.meta.url).href);
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const file = (path) => fileURLToPath(new URL(path, import.meta.url));
@@ -213,6 +213,126 @@ test("the checked-in declaration files are what the generator writes today", () 
     typesFor(coverageSchema, { name: "Coverage", source: "tests/typecheck/coverage.schema.json" }),
     `tests/typecheck/coverage.d.ts is stale — ${regenerate}`,
   );
+});
+
+/* ---- ISS-20: the catalogue as the second source ----
+ *
+ * A schema does not only live in a file. A module installed over the wire —
+ * `establish` for its collections, `declare` for its operations — is never
+ * written to anyone's disk, and until `schemaFromServer` existed its shape had
+ * to be copied by hand into whoever called it. These tests stand in for the
+ * socket; tests/types-from-server.test.mjs is the one that dials a real store.
+ */
+
+const SOME_URL = "sapedb://acme:a-password-of-the-right-shape@127.0.0.1:7433/main?sig=abcd";
+
+/** A client that answers out of an object rather than a socket. */
+function reader(answers) {
+  const asked = [];
+  return {
+    asked,
+    async elevate(target, secret) {
+      asked.push({ call: "elevate", target, secret });
+      return { operator: answers.operator ?? true };
+    },
+    async explore(target, request) {
+      asked.push({ call: "explore", target, request });
+      if ("explored" in answers) return answers.explored;
+      return { here: { operations: answers.operations } };
+    },
+  };
+}
+
+/** The ledger's operations in the order the store keys them: by name. */
+const byName = [...ledgerSchema.operations].sort((a, b) => (a.name < b.name ? -1 : 1));
+
+test("a catalogue reaches the generator as the schema it is, and writes the same declarations", async () => {
+  /* The catalogue carries `version`, which no file does, and the operations
+     arrive name-ordered rather than in the order somebody wrote them. Neither
+     is invented here: both were read off a real daemon. */
+  const catalogue = byName.map((operation, at) => ({ ...operation, version: at + 1 }));
+  const schema = await schemaFromServer(reader({ operations: catalogue }), SOME_URL, "the-server-secret");
+
+  assert.equal(
+    typesFor(schema, { source: "somewhere" }),
+    typesFor({ operations: byName }, { source: "somewhere" }),
+    "a declaration read off the wire generated different text from the same declaration read off disk",
+  );
+});
+
+test("the secret is proved before the catalogue is asked for, because the store will not answer otherwise", async () => {
+  const client = reader({ operations: byName });
+  await schemaFromServer(client, SOME_URL, "the-server-secret");
+
+  assert.deepEqual(
+    client.asked.map((each) => each.call),
+    ["elevate", "explore"],
+    "the catalogue was asked for without proving the secret first, which the real store refuses",
+  );
+  assert.equal(client.asked[0].secret, "the-server-secret");
+  assert.deepEqual(client.asked[1].request, { catalogue: true });
+});
+
+test("reading a catalogue without the server's secret is refused before anything is dialled", async () => {
+  const client = reader({ operations: byName });
+
+  await assert.rejects(() => schemaFromServer(client, SOME_URL, ""), /secret/);
+  await assert.rejects(() => schemaFromServer(client, SOME_URL, undefined), /secret/);
+  /* Not only that it refused: that it refused without opening a connection.
+     A refusal that has already dialled has already told the network that
+     somebody is asking what this database holds. */
+  assert.deepEqual(client.asked, [], "a call went out on the way to refusing for want of a secret");
+});
+
+test("a catalogue that is not there, or has nothing in it, is refused rather than generated", async () => {
+  await assert.rejects(
+    () => schemaFromServer(reader({ operator: false, operations: byName }), SOME_URL, "wrong"),
+    /operator/,
+  );
+  await assert.rejects(() => schemaFromServer(reader({ explored: {} }), SOME_URL, "secret"), /without a catalogue/);
+  /* `[]` is what a real daemon answers for a database nobody has declared
+     anything in; `null` is what one from before that fix answered. Both mean
+     the same thing, and neither is a malformed schema. */
+  await assert.rejects(() => schemaFromServer(reader({ operations: [] }), SOME_URL, "secret"), /apply a schema/);
+  await assert.rejects(() => schemaFromServer(reader({ operations: null }), SOME_URL, "secret"), /apply a schema/);
+});
+
+/** Runs the shipped bin and hands back what it wrote and what it exited with. */
+function cli(args, environment = {}) {
+  const run = spawnSync(process.execPath, [file("../bin/sapedb-types.mjs"), ...args], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, SAPEDB_SECRET: undefined, ...environment },
+  });
+  return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+}
+
+test("the bin still writes from a file exactly what it wrote before the second source existed", () => {
+  /* The positive control, and it comes first on purpose: every refusal below
+     would pass just as well against a bin that refused everything. */
+  const run = cli(["fixtures/ledger.schema.json"]);
+
+  assert.equal(run.status, 0, `the file path failed: ${run.stderr}`);
+  assert.equal(run.stdout, read("./typecheck/ledger.d.ts"), "the file path no longer writes what it used to");
+});
+
+test("the bin refuses --from without a secret, and says which secret it wants", () => {
+  const run = cli(["--from", SOME_URL, "--insecure"]);
+
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /--secret/);
+  assert.match(run.stderr, /SAPEDB_SECRET/);
+  assert.equal(run.stdout, "", "it wrote a declaration file on the way to refusing");
+});
+
+test("the bin refuses a file and a store together rather than choosing one", () => {
+  /* Two sources are two schemas until something proves otherwise, and proving
+     it is this program's output, not its input. */
+  const run = cli(["fixtures/ledger.schema.json", "--from", SOME_URL], { SAPEDB_SECRET: "a-secret" });
+
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /not both/);
+  assert.equal(run.stdout, "");
 });
 
 test("a call the schema allows compiles", () => {

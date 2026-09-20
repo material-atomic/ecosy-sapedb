@@ -78,6 +78,35 @@
 
 ### Added
 
+- `sapedb-types --from <connection-string>` and `schemaFromServer` (ISS-20):
+  the generator can now read a running store's catalogue instead of a
+  `schema.json` on disk. Before this, the shape of a module installed over the
+  wire — `establish` for its collections, `declare` for its operations, never
+  written to anyone's disk — had to be copied by hand into whoever called it:
+  the store had been answering `WhatIsHere` with every declaration it holds,
+  and nothing joined that to the generator.
+
+  `schemaFromServer(client, target, secret)` proves the secret, asks for the
+  catalogue and hands back the same `Schema` a file parses to, so both sources
+  reach the same `typesFor`. It takes the two methods it calls rather than a
+  `Client`, which keeps `@ecosy/sapedb/types` free of the driver and the
+  transport. The secret is not optional: the store refuses an unelevated
+  `explore` with `not_operator`, and the CLI refuses without `--secret` (or
+  `SAPEDB_SECRET`) before it dials at all. The file path is unchanged, down to
+  the byte — `tests/types.test.mjs` runs the bin against the fixture and
+  compares it with the committed `tests/typecheck/ledger.d.ts`.
+
+  One difference between the two sources is real and is not flattened away:
+  **the order**. A file lists its operations as somebody wrote them; the store
+  keys them by name, so a catalogue arrives name-ordered with no memory of the
+  file's order. The same schema therefore declares the same operations in
+  different places — every other byte identical, measured line for line
+  against a real daemon in `tests/types-from-server.test.mjs`. Neither side is
+  sorted to match: an interface's member order means nothing to the compiler,
+  and reordering the file path would change the one output that already has
+  users. The generated header names its source either way, with a connection
+  string's password and signature redacted.
+
 - `InvokeOptions.grant` (ISS-12): `invoke` can now present a scope grant, so an
   operation declared with `scopes` (added to the wire in 1.0.0) is one this
   client can actually call. Before this, `grep -riF grant src/` found
