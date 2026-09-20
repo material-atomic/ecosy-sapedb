@@ -262,6 +262,40 @@ export interface ClientToken {
    * need calling again later — see {@link InvokeOptions.version}.
    */
   declare(target: string | ConnectionTarget, operation: Operation, options?: { timeout?: number }): Promise<Operation>;
+  /**
+   * Declares a collection on a database whose server is already running, on a
+   * connection that has called {@link elevate}. Not operating this connection
+   * gets the same refusal as {@link explore} and {@link declare}:
+   * `not_operator`.
+   *
+   * This is {@link declare}'s other half, and it arrived later because the two
+   * answer "the name is already declared" differently. An operation is
+   * versioned — a caller is built against one, so a redeclaration must never
+   * move the ground under it — but a collection has no version to give: it is
+   * where the documents physically are, and there is one of those. So
+   * establishing a name that already exists brings THAT collection up to date
+   * **in place**, not a second one: indexes and rollups it names are built
+   * over the documents already stored, or kept as they were; ones it leaves
+   * out are dropped, entries and all; and what cannot be changed in place —
+   * the primary key, how the collection is divided, an index that keeps its
+   * name and changes its shape — is refused, in the store's own words, rather
+   * than done quietly or as a second collection nobody asked for.
+   *
+   * This runs the same `store.Declare` that `sapedb apply` calls offline, over
+   * the wire — not a second, looser copy of the rules. A shape it refuses
+   * offline it refuses here too, verbatim.
+   *
+   * The {@link CollectionSpec} handed back is what actually took effect, read
+   * off the collection rather than echoed: it carries the ids the store
+   * assigned (or kept, for a collection this reuses), which is what makes it
+   * worth reading even when the declaration was sent before — that id is what
+   * says whether it is one collection or two.
+   */
+  establish(
+    target: string | ConnectionTarget,
+    spec: CollectionDeclaration,
+    options?: { timeout?: number },
+  ): Promise<CollectionSpec>;
   /** Closes every connection. Calls in flight are rejected. */
   close(): Promise<void>;
   stats(): PoolStats;
@@ -536,6 +570,38 @@ export interface RollupSpec {
   count?: boolean;
   sum?: string[];
   id: number;
+}
+
+/**
+ * An index as {@link ClientToken.establish} sends it — everything
+ * {@link IndexSpec} carries except `id`. An index being established has no id
+ * to give: the store hands out a fresh one for an index that is new, and
+ * keeps the one an index of the same name already had — either way, an id a
+ * caller sent would be looked at by nobody. Mirrors what `store.Declare`
+ * actually reads off an incoming `store.Index` for a declaration, not a
+ * narrower type this driver invented on top of it.
+ */
+export type IndexDeclaration = Omit<IndexSpec, "id">;
+
+/** A rollup as {@link ClientToken.establish} sends it. Same reasoning as {@link IndexDeclaration}: `id` is the store's to assign, never the caller's to propose. */
+export type RollupDeclaration = Omit<RollupSpec, "id">;
+
+/**
+ * A collection as {@link ClientToken.establish} sends it — everything
+ * {@link CollectionSpec} carries except `id`, `next_index_id` and
+ * `next_rollup_id`. Those three are what {@link CollectionSpec} is worth
+ * reading back *for*: the store assigns them, and for a collection that
+ * already exists it ignores whatever a caller sent for them outright — see
+ * {@link ClientToken.establish}. A caller declaring a collection has none of
+ * the three to give, on a first declaration or a tenth.
+ */
+export interface CollectionDeclaration {
+  name: string;
+  key: PrimaryKey;
+  /** Left out (`undefined`) declares no indexes at all — the same thing `null` means on {@link CollectionSpec}, read back. */
+  indexes?: IndexDeclaration[] | null;
+  partition?: Partition;
+  rollups?: RollupDeclaration[];
 }
 
 /**
@@ -1269,6 +1335,34 @@ export function Client(options: ClientOptions): ClientClass {
          would be a second version nobody asked for. */
       const answer = (await send(parsed, FrameType.declare, body, timeout)) as { operation: Operation };
       return answer.operation;
+    }
+
+    async establish(
+      target: string | ConnectionTarget,
+      spec: CollectionDeclaration,
+      establishOptions: { timeout?: number } = {},
+    ): Promise<CollectionSpec> {
+      if (!spec || typeof spec.name !== "string" || spec.name.length === 0) {
+        throw new TypeError("[ecosy/sapedb] establish needs a spec with a name");
+      }
+
+      const parsed = resolveTarget(target);
+      const timeout = establishOptions.timeout ?? requestTimeout;
+
+      const body: Record<string, unknown> = { spec };
+      if (mode === "account") {
+        body.dbname = parsed.dbname;
+        body.sig = parsed.sig;
+      }
+
+      /* Not retried on a dropped connection, the same as declare(): this
+         writes, and a repeat is not free even though it is safe — establishing
+         the same collection twice is the same in-place upgrade both times, but
+         one that adds an index or a rollup walks every document already
+         stored to build it. A retry that landed after all would walk them
+         again for work this caller never asked to pay for twice. */
+      const answer = (await send(parsed, FrameType.establish, body, timeout)) as { spec: CollectionSpec };
+      return answer.spec;
     }
 
     async close(): Promise<void> {

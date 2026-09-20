@@ -194,6 +194,44 @@
     `version: 1` still reaches the older, differently-projected rows after
     the unversioned call has moved on to the new one.
 
+- `Client#establish(target, spec, options?)`, frame type 14 (SAPE-14). The
+  server can now declare a *collection* on a database whose server is
+  already running, the other half of the gap `declare` closed for
+  operations, and this is the driver method for it — `store.Declare`, the
+  function `sapedb apply` calls, reached over the socket `elevate` proved
+  instead of the exclusive file lock `apply` needs.
+
+  `declare` and `establish` answer "the name is already declared"
+  differently, and the difference is not this driver's choice — it is
+  `store.Declare`'s own behaviour, read off a real daemon rather than
+  assumed. An operation is versioned: a caller is built against one, so a
+  redeclaration writes a **new version** and leaves the old one runnable. A
+  collection has no version to give — it is where the documents physically
+  are, and there is one of those — so establishing a name that already
+  exists brings **that** collection up to date **in place**: indexes and
+  rollups it names are built over the documents already stored, or kept as
+  they were; ones it leaves out are dropped, entries and all; and what
+  cannot be changed in place (the primary key, how the collection is
+  divided, an index that keeps its name and changes its shape) is refused,
+  in the store's own words, rather than done quietly or as a second
+  collection nobody asked for.
+
+  `CollectionDeclaration` (and `IndexDeclaration`/`RollupDeclaration`) is
+  what `establish` takes — `CollectionSpec` minus the fields the store
+  assigns (`id`, `next_index_id`, `next_rollup_id`, and each index's and
+  rollup's own `id`): a caller declaring a collection has none of those to
+  give, on a first declaration or a tenth, and `CollectionSpec` itself is
+  unchanged so nothing that already reads a catalogue is affected. Not
+  operating the connection is refused with `not_operator`, same as
+  `explore`/`declare`. Four things measured against a real daemon in
+  `tests/server.test.mjs`, each against its own positive control: a
+  collection established over the wire, an operation declared and invoked
+  against it, with the daemon's pid unchanged throughout; `establish` before
+  `elevate` refused with nothing written; the exact same declaration sent
+  twice comes back with the same id, so it reads as one collection and not
+  two; and moving an existing collection's primary key is refused verbatim
+  in the store's own words, not a paraphrase this driver made up.
+
 - `CommandNotFound.is()`, `CommandUnauthorized.is()`, `CommandCycle.is()`.
   This package ships two builds of `src/commander/index.ts` — `import`
   resolves to `dist/commander/index.mjs`, `require` to

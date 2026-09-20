@@ -762,6 +762,195 @@ test("a step that takes an earlier step's key from a leg that may answer more th
   }
 });
 
+/* ---- establish (task SAPE-14) ----
+ *
+ * Before this, adding a collection to a database whose server was already
+ * running meant stopping it and running `sapedb apply`. `establish` is
+ * `declare`'s other half, over the same wire, and it answers the question
+ * "the name is already declared" differently: an operation gets a new
+ * version and every older one stays runnable, but a collection is where the
+ * documents physically are, and there is one of those — so establishing a
+ * name that already exists upgrades THAT collection in place rather than
+ * making a second one.
+ *
+ * The positive control below is what everything after it is measured
+ * against: a brand new collection established on the daemon this suite has
+ * kept running since the top of the file, an operation declared over it, and
+ * that operation invoked for real rows — with the daemon's pid unchanged
+ * throughout, so "already running" is not a claim taken on faith.
+ */
+test("establish declares a collection on a daemon that is already running: an operation over it runs and answers real rows, and the daemon never restarts", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+  const pidBefore = server.pid;
+
+  try {
+    await client.elevate(url, SECRET);
+
+    const spec = await client.establish(url, {
+      name: "widgets",
+      key: { path: "id", type: "string", auto: "ulid" },
+      indexes: [{ name: "by_kind", fields: [{ path: "kind", type: "string", missing: "skip" }] }],
+    });
+    assert.equal(spec.name, "widgets");
+    assert.ok(spec.id > 0, "the new collection came back with no id, so nothing assigned it one");
+    assert.equal(spec.indexes.length, 1);
+    assert.equal(spec.indexes[0].name, "by_kind");
+
+    const catalogue = await client.explore(url, { catalogue: true });
+    assert.ok(
+      catalogue.here.collections.some((c) => c.name === "widgets" && c.id === spec.id),
+      "the collection just established over the wire is missing from the catalogue",
+    );
+
+    // Vocabulary for the collection establish just made room for — an insert
+    // and a scan, declared the same way any operation is.
+    await client.declare(url, {
+      name: "widgets.add",
+      collection: "widgets",
+      action: "insert",
+      input: [
+        { name: "label", type: "string", required: true },
+        { name: "kind", type: "string", required: true },
+      ],
+      document: { label: { arg: "label" }, kind: { arg: "kind" } },
+    });
+    await client.declare(url, {
+      name: "widgets.by_kind",
+      collection: "widgets",
+      action: "scan",
+      index: "by_kind",
+      limit: 10,
+      input: [{ name: "kind", type: "string", required: true }],
+      from: { terms: [{ arg: "kind" }] },
+      to: { terms: [{ arg: "kind" }] },
+    });
+
+    const written = await client.invoke(url, "widgets.add", { label: "the first widget", kind: "gadget" }, { write: true });
+    assert.equal(written.changed, 1);
+
+    const read = await client.invoke(url, "widgets.by_kind", { kind: "gadget" });
+    assert.equal(read.count, 1);
+    assert.equal(read.rows[0].label, "the first widget");
+
+    // The whole point: this ran on the process the suite started at the top,
+    // never stopped and restarted to make room for the new collection.
+    assert.equal(server.pid, pidBefore, "the daemon's pid changed — establishing must have restarted it");
+    assert.equal(server.exitCode, null, "the daemon exited during the test");
+  } finally {
+    await client.close();
+  }
+});
+
+test("establish before elevate is refused the same way declare is, and nothing is written", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await assert.rejects(
+      () =>
+        client.establish(url, {
+          name: "should_never_exist",
+          key: { path: "id", type: "string", auto: "ulid" },
+        }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "not_operator");
+        assert.match(error.message, /prove the server secret/, "the refusal should say why, not just that it happened");
+        return true;
+      },
+    );
+
+    // The refusal must not have written anything: ask through a connection
+    // that has elevated, since the one that was refused may not read the
+    // catalogue either.
+    const proof = new Made();
+    try {
+      await proof.elevate(url, SECRET);
+      const catalogue = await proof.explore(url, { catalogue: true });
+      assert.ok(
+        !catalogue.here.collections.some((c) => c.name === "should_never_exist"),
+        "a declaration refused for not_operator was written anyway",
+      );
+    } finally {
+      await proof.close();
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+test("establishing an already-established collection again is accepted, and its id does not change — one collection, not two", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await client.elevate(url, SECRET);
+
+    // "widgets" was established by the positive control above; establishing
+    // the exact same declaration again must be accepted, not refused for
+    // already existing.
+    const again = await client.establish(url, {
+      name: "widgets",
+      key: { path: "id", type: "string", auto: "ulid" },
+      indexes: [{ name: "by_kind", fields: [{ path: "kind", type: "string", missing: "skip" }] }],
+    });
+
+    const catalogue = await client.explore(url, { catalogue: true });
+    const widgets = catalogue.here.collections.filter((c) => c.name === "widgets");
+    assert.equal(widgets.length, 1, "re-establishing the same collection produced a second one");
+    assert.equal(again.id, widgets[0].id, "the id changed, so this reads as a different collection");
+
+    // And the row the positive control wrote is still there — an upgrade in
+    // place, not a rebuild from nothing.
+    const read = await client.invoke(url, "widgets.by_kind", { kind: "gadget" });
+    assert.equal(read.count, 1, "re-establishing lost the document that was already there");
+  } finally {
+    await client.close();
+  }
+});
+
+test("establishing a Spec that moves an existing collection's primary key is refused, in the store's own words", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await client.elevate(url, SECRET);
+
+    // "notes" was declared through schema.json before the daemon started,
+    // with key { path: "id", type: "string", auto: "ulid" } — see the schema
+    // object at the top of this file. Moving the path is one of the changes
+    // store.Declare refuses rather than makes in place.
+    await assert.rejects(
+      () =>
+        client.establish(url, {
+          name: "notes",
+          key: { path: "moved", type: "string", auto: "ulid" },
+        }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        // The store's own sentence, not a paraphrase this driver made up — see
+        // internal/store/store.go's Declare and its ErrIncompatible, and
+        // internal/server/establish_test.go's
+        // TestEstablishingAnExistingCollectionUpgradesItInPlace, which pins
+        // the identical wording for the identical case.
+        assert.equal(
+          error.message,
+          '[ecosy/sapedb] sapedb/store: this does not match what was declared before: the primary key of "notes" was declared {Path:id Type:string Auto:ulid}',
+        );
+        return true;
+      },
+    );
+
+    // The refusal must not have moved the collection it was refused on.
+    const catalogue = await client.explore(url, { catalogue: true });
+    const notes = catalogue.here.collections.find((c) => c.name === "notes");
+    assert.equal(notes.key.path, "id", "a refused establish moved the primary key anyway");
+  } finally {
+    await client.close();
+  }
+});
+
 test("catalogue on a database with nothing declared yet answers empty lists, not null", { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapedb-empty-"));
   const port = await freePort();
