@@ -102,6 +102,18 @@ export interface InvokeOptions {
   writeId?: string;
   /** Overrides {@link ClientOptions.requestTimeout}. */
   timeout?: number;
+  /**
+   * Runs this exact declared version instead of the latest one.
+   *
+   * Only meaningful once a name has been declared more than once — by
+   * {@link ClientToken.declare}, or by a second `sapedb apply` — since that is
+   * the only way an older version outlives the name still pointing at it.
+   * Left out (or `0`, which means the same thing), this is the call every
+   * caller already knows: whatever the name currently resolves to. The field
+   * is never sent on the wire when it is `0`, matching the store's own
+   * `omitempty` — an explicit zero would be a difference with no meaning.
+   */
+  version?: number;
 }
 
 export interface SubscribeOptions {
@@ -189,6 +201,31 @@ export interface ClientToken {
     request: ExploreRequest,
     options?: { timeout?: number },
   ): Promise<Explored<Row>>;
+  /**
+   * Stores an operation on a database whose server is already running, on a
+   * connection that has called {@link elevate}. Not operating this connection
+   * gets the same refusal as {@link explore}: `not_operator`.
+   *
+   * This is the same declaration `sapedb apply` writes offline, run through
+   * `store.DeclareOperation` on the server — not a second, looser copy of the
+   * rules. A shape it refuses offline (a `scan` with no `limit`, say) it
+   * refuses here too, in the store's own words. `explore`'s typed `scan`
+   * looks like the same shape and is not held to this: `explore` silently
+   * fills in a limit before it checks anything, because an operator who did
+   * not say is not asking for everything. A declaration is a promise about
+   * cost that somebody has to keep, so nothing here fills in what was left
+   * out.
+   *
+   * Declaring a name that is already declared writes a **new version** and
+   * leaves the old one exactly as it was — this never overwrites. There is
+   * also no "nothing changed, so nothing happened": calling this twice with
+   * byte-for-byte the same operation still produces two versions. A caller
+   * that declares from a deploy step on every run, rather than once when the
+   * shape actually changes, grows a version for every deploy forever. Read
+   * the version back off what this resolves to when a specific one might
+   * need calling again later — see {@link InvokeOptions.version}.
+   */
+  declare(target: string | ConnectionTarget, operation: Operation, options?: { timeout?: number }): Promise<Operation>;
   /** Closes every connection. Calls in flight are rejected. */
   close(): Promise<void>;
   stats(): PoolStats;
@@ -988,6 +1025,7 @@ export function Client(options: ClientOptions): ClientClass {
         body.sig = parsed.sig;
       }
       if (writeId) body.writeId = writeId;
+      if (invokeOptions.version) body.version = invokeOptions.version;
 
       try {
         return (await send(parsed, FrameType.invoke, body, invokeOptions.timeout ?? requestTimeout)) as Result;
@@ -1113,6 +1151,31 @@ export function Client(options: ClientOptions): ClientClass {
         }
         throw error;
       }
+    }
+
+    async declare(
+      target: string | ConnectionTarget,
+      operation: Operation,
+      declareOptions: { timeout?: number } = {},
+    ): Promise<Operation> {
+      if (!operation || typeof operation.name !== "string" || operation.name.length === 0) {
+        throw new TypeError("[ecosy/sapedb] declare needs an operation with a name");
+      }
+
+      const parsed = resolveTarget(target);
+      const timeout = declareOptions.timeout ?? requestTimeout;
+
+      const body: Record<string, unknown> = { operation };
+      if (mode === "account") {
+        body.dbname = parsed.dbname;
+        body.sig = parsed.sig;
+      }
+
+      /* Not retried on a dropped connection: unlike explore, this writes, and
+         a redeclaration is never a no-op — a retry that landed after all
+         would be a second version nobody asked for. */
+      const answer = (await send(parsed, FrameType.declare, body, timeout)) as { operation: Operation };
+      return answer.operation;
     }
 
     async close(): Promise<void> {

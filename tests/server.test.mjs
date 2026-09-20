@@ -345,6 +345,214 @@ test("explore is refused before elevate, and answers get/scan/count/catalogue af
   }
 });
 
+/* The positive control for everything below: declare works, end to end, on
+   the daemon this file has kept running since the top of the suite. Every
+   rejection tested after this one is measured against a path already proven
+   to succeed — so a refusal that should not be there cannot be mistaken for
+   a driver that was never wired up in the first place. */
+test("declare stores an operation on a daemon that is already running: it lands in the catalogue, runs, and the daemon never restarts", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+  const pidBefore = server.pid;
+
+  try {
+    await client.elevate(url, SECRET);
+
+    const stored = await client.declare(url, {
+      name: "notes.declared_recent",
+      collection: "notes",
+      action: "scan",
+      index: "by_topic",
+      input: [{ name: "topic", type: "string", required: true }],
+      from: { terms: [{ arg: "topic" }] },
+      to: { terms: [{ arg: "topic" }] },
+      limit: 10,
+      projection: ["topic"],
+    });
+    assert.equal(stored.name, "notes.declared_recent");
+    assert.equal(stored.version, 1, "a first declaration should come back at version 1");
+
+    const catalogue = await client.explore(url, { catalogue: true });
+    assert.ok(
+      catalogue.here.operations.some((o) => o.name === "notes.declared_recent" && o.version === 1),
+      "the operation just declared over the wire is missing from the catalogue",
+    );
+
+    await client.invoke(url, "notes.add", { body: "declared live", topic: "declared-recent-test" }, { write: true });
+
+    const read = await client.invoke(url, "notes.declared_recent", { topic: "declared-recent-test" });
+    assert.equal(read.count, 1);
+    assert.deepEqual(Object.keys(read.rows[0]), ["topic"], "the projection declared over the wire did not take effect");
+    assert.equal(read.rows[0].topic, "declared-recent-test");
+
+    // The whole point: this ran on the process the suite started at the top,
+    // never stopped and restarted to pick the declaration up.
+    assert.equal(server.pid, pidBefore, "the daemon's pid changed — declaring must have restarted it");
+    assert.equal(server.exitCode, null, "the daemon exited during the test");
+  } finally {
+    await client.close();
+  }
+});
+
+test("declare before elevate is refused the same way explore is, with a fresh connection that never proved the secret", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await assert.rejects(
+      () =>
+        client.declare(url, {
+          name: "notes.should_never_land",
+          collection: "notes",
+          action: "scan",
+          index: "by_topic",
+          input: [{ name: "topic", type: "string", required: true }],
+          from: { terms: [{ arg: "topic" }] },
+          to: { terms: [{ arg: "topic" }] },
+          limit: 10,
+        }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "not_operator");
+        return true;
+      },
+    );
+
+    // The refusal must not have written anything: the catalogue this
+    // connection is not even allowed to read is unreachable to check, so ask
+    // through a connection that has elevated instead.
+    const proof = new Made();
+    try {
+      await proof.elevate(url, SECRET);
+      const catalogue = await proof.explore(url, { catalogue: true });
+      assert.ok(
+        !catalogue.here.operations.some((o) => o.name === "notes.should_never_land"),
+        "a declaration refused for not_operator was written anyway",
+      );
+    } finally {
+      await proof.close();
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+test("a scan declared with no limit is refused in the store's own words; the identical shape through explore is filled in and accepted", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await client.elevate(url, SECRET);
+
+    await assert.rejects(
+      () =>
+        client.declare(url, {
+          name: "notes.no_limit_scan",
+          collection: "notes",
+          action: "scan",
+          index: "by_topic",
+          input: [{ name: "topic", type: "string", required: true }],
+          from: { terms: [{ arg: "topic" }] },
+          to: { terms: [{ arg: "topic" }] },
+          // No `limit` — this is the one field this test is about.
+        }),
+      (error) => {
+        assert.ok(error instanceof Refused, `want Refused, got ${error.constructor.name}: ${error.message}`);
+        assert.equal(error.code, "declaration");
+        // The store's own words, not a paraphrase this driver made up — see
+        // internal/store/ops.go's ErrDeclaration on the server side.
+        assert.equal(
+          error.message,
+          "[ecosy/sapedb] sapedb/store: the declaration does not make sense: a scan must declare how many rows it may return",
+        );
+        return true;
+      },
+    );
+
+    /* The asymmetry the task warns about: the same shape, no limit at all,
+       reaches store.Explore instead of store.DeclareOperation and comes back
+       with rows — because Explore silently fills Limit in before it checks
+       anything, and a declaration is a promise about cost nothing here may
+       make on a caller's behalf. If this ever throws, the asymmetry closed
+       and the comment above (and on declare() in src/client/index.ts) is the
+       one that needs rewriting, not this test. */
+    const explored = await client.explore(url, {
+      access: {
+        kind: "scan",
+        collection: "notes",
+        index: "by_topic",
+        from: { values: ["explore-test"] },
+        to: { values: ["explore-test"] },
+        // No `limit` here either — and this one is accepted.
+      },
+    });
+    assert.ok(explored.result.count >= 1, "the unlimited scan through explore should have been accepted, not refused");
+  } finally {
+    await client.close();
+  }
+});
+
+test("invoking an explicit version reaches an older declaration after a redeclare replaces what the name resolves to", { skip }, async () => {
+  const Made = Client({ transport: nodeTransport({ insecure: true }), mode: "bound", requestTimeout: 5000 });
+  const client = new Made();
+
+  try {
+    await client.elevate(url, SECRET);
+
+    const first = await client.declare(url, {
+      name: "notes.versioned_lookup",
+      collection: "notes",
+      action: "scan",
+      index: "by_topic",
+      input: [{ name: "topic", type: "string", required: true }],
+      from: { terms: [{ arg: "topic" }] },
+      to: { terms: [{ arg: "topic" }] },
+      limit: 10,
+      projection: ["topic"],
+    });
+    assert.equal(first.version, 1);
+
+    await client.invoke(url, "notes.add", { body: "under an old declaration", topic: "versioned-lookup-test" }, { write: true });
+
+    const throughV1 = await client.invoke(url, "notes.versioned_lookup", { topic: "versioned-lookup-test" });
+    assert.equal(throughV1.count, 1);
+    assert.deepEqual(Object.keys(throughV1.rows[0]), ["topic"], "version 1 was declared with a projection of just topic");
+
+    // Redeclaring the same name writes a NEW version and leaves the old one
+    // exactly as it was — a second row for the same call, not an overwrite.
+    const second = await client.declare(url, {
+      name: "notes.versioned_lookup",
+      collection: "notes",
+      action: "scan",
+      index: "by_topic",
+      input: [{ name: "topic", type: "string", required: true }],
+      from: { terms: [{ arg: "topic" }] },
+      to: { terms: [{ arg: "topic" }] },
+      limit: 10,
+      // No projection this time: the whole document comes back.
+    });
+    assert.equal(second.version, 2, "redeclaring the same name should mint a new version, not reuse the old one");
+
+    const throughLatest = await client.invoke(url, "notes.versioned_lookup", { topic: "versioned-lookup-test" });
+    assert.ok(
+      Object.keys(throughLatest.rows[0]).length > 1,
+      "the unversioned call should now run version 2, which declared no projection",
+    );
+    assert.equal(throughLatest.rows[0].topic, "versioned-lookup-test");
+
+    // And the old version is still there to be asked for by name — this is
+    // the whole reason InvokeOptions.version exists.
+    const throughV1Again = await client.invoke(url, "notes.versioned_lookup", { topic: "versioned-lookup-test" }, { version: 1 });
+    assert.deepEqual(
+      Object.keys(throughV1Again.rows[0]),
+      ["topic"],
+      "asking for version 1 explicitly should still run the projected declaration, not the redeclared one",
+    );
+  } finally {
+    await client.close();
+  }
+});
+
 test("catalogue on a database with nothing declared yet answers collections: null, not []", { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapedb-empty-"));
   const port = await freePort();

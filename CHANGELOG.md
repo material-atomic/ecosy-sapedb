@@ -132,6 +132,48 @@
     own hand-written cases, not against `fixtures/frames.json` — which is a
     pre-existing gap this change did not close.
 
+- `Client#declare(target, operation, options?)`, frame type 13, and
+  `InvokeOptions.version`. The Go client already had both (`Client.Declare`,
+  `Client.InvokeVersion`, commits `72f6b2c` and `2a05cab` on the store's
+  side); this closes the gap on the TypeScript side.
+
+  - `declare` stores an operation on a database whose server is already
+    running, on a connection that has called `elevate` — the store's own
+    `store.DeclareOperation`, the function `sapedb apply` calls, reached over
+    a socket instead of the exclusive file lock `apply` needs, which is what
+    used to force stopping the server to add one operation. Not operating
+    the connection is refused with `not_operator`, same as `explore`.
+    Declaring a name that is already declared writes a **new version** and
+    leaves the old one exactly as it was; there is no "nothing changed, so
+    nothing happened" — the same declaration sent twice is two versions, not
+    one. It also runs the same validation `apply` does, with no second copy
+    of the rules and nothing normalised on the way in: a `scan` declared with
+    no `limit` is refused in the store's own words
+    (`sapedb/store: the declaration does not make sense: a scan must declare
+    how many rows it may return`), even though the identical shape sent
+    through `explore` is accepted, because `explore` silently fills the limit
+    in before it checks anything and a declaration is a promise about cost
+    nothing here may make on a caller's behalf.
+  - `InvokeOptions.version` runs one particular declared version instead of
+    whatever the name currently resolves to — the only way to reach a
+    declaration after something has been declared over the top of it. Left
+    out, or `0`, this is the call every caller already knows; the field is
+    never sent on the wire at `0`, matching the store's own `omitempty`. This
+    is an addition to `InvokeOptions`, not a new parameter on `invoke` — the
+    Go client took a second method (`InvokeVersion`) for the same reason:
+    `invoke`'s signature already shipped and this package does not take that
+    back for a field almost no caller passes.
+  - Both measured against a real daemon in `tests/server.test.mjs`: a
+    declaration lands in the catalogue and is callable while the daemon
+    keeps the same pid throughout; a `declare` before `elevate` is refused,
+    checked against a connection that had already declared successfully
+    moments before so the refusal cannot be mistaken for a driver that was
+    never wired up; the scan-with-no-limit refusal is checked against the
+    store's exact wording, with the same shape through `explore` checked
+    accepted right beside it; and a redeclare followed by an explicit
+    `version: 1` still reaches the older, differently-projected rows after
+    the unversioned call has moved on to the new one.
+
 - `CommandNotFound.is()`, `CommandUnauthorized.is()`, `CommandCycle.is()`.
   This package ships two builds of `src/commander/index.ts` — `import`
   resolves to `dist/commander/index.mjs`, `require` to
